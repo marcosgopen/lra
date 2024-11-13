@@ -136,6 +136,7 @@
     <version.parsson>1.1.3</version.parsson>
     <version.smallrye-converter-api>2.7.0</version.smallrye-converter-api>
     <version.sortpom>3.0.0</version.sortpom>
+    <version.undertow>2.3.18.Final</version.undertow>
     <version.wildfly-maven-plugin>4.1.0.Final</version.wildfly-maven-plugin>
 
   </properties>
@@ -211,6 +212,16 @@
         <artifactId>resteasy-undertow</artifactId>
         <version>${version.org.jboss.resteasy}</version>
       </dependency>
+      <dependency>
+        <groupId>io.undertow</groupId>
+        <artifactId>undertow-core</artifactId>
+        <version>${version.undertow}</version>
+      </dependency>
+      <dependency>
+	    <groupId>io.undertow</groupId>
+	    <artifactId>undertow-servlet</artifactId>
+	    <version>${version.undertow}</version>
+	  </dependency>
       <!-- end undertow with RestEasy -->
 
       <dependency>

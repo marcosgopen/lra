@@ -10,7 +10,6 @@
     <groupId>org.jboss.narayana.lra</groupId>
     <artifactId>lra-parent</artifactId>
     <version>1.0.0.Final-SNAPSHOT</version>
-    <relativePath>../pom.xml</relativePath>
   </parent>
 
   <artifactId>lra-test</artifactId>
@@ -20,6 +19,7 @@
 
   <modules>
     <module>arquillian-extension</module>
+    <module>coordinator-war</module>
     <module>tck</module>
     <module>basic</module>
   </modules>

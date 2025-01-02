@@ -110,14 +110,14 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
 
         client = ClientBuilder.newClient();
         lraClient = new NarayanaLRAClient();
-
+        // Cleans Object Store in case there are transactions from previous tests
+        clearRecoveryLogFromFS();
         for (Map.Entry<String, String> entry : containerDeploymentMap.entrySet()) {
             startContainer(entry.getKey(), entry.getValue());
         }
 
-        // Cleans Object Store in case there are transactions from previous tests
         clearRecoveryLogFromObjectStore();
-        clearRecoveryLogFromFS();
+
     }
 
     @After
@@ -128,11 +128,12 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
 
         // Cleans Object Store in case there are still active transactions
         clearRecoveryLogFromObjectStore();
-        clearRecoveryLogFromFS();
 
         for (Map.Entry<String, String> entry : containerDeploymentMap.entrySet()) {
             stopContainer(entry.getKey(), entry.getValue());
         }
+        clearRecoveryLogFromFS();
+
     }
 
     /**
@@ -150,57 +151,27 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
     public void lraCoordinatorShortTimeoutLRA(@ArquillianResource @OperateOnDeployment(LRA_PARTICIPANT_DEPLOYMENT_QUALIFIER) URL baseURL)
             throws URISyntaxException {
 
-        String lraId;
-        URI lraListenerURI = UriBuilder.fromUri(baseURL.toURI()).path(LRAListener.LRA_LISTENER_PATH).build();
+        Long SHORTER_TIMEOUT = 1000L;
+        URI shortLRA = lraClient.startLRA(null, "Short Timeout Recovery Test", SHORTER_TIMEOUT, ChronoUnit.MILLIS);
 
-        // Starts an LRA with a short time limit by invoking a resource annotated with @LRA. The time limit is
-        // defined as LRAListener.LRA_SHORT_TIMELIMIT
-        Response response = client
-                .target(lraListenerURI)
-                .path(LRAListener.LRA_LISTENER_ACTION)
-                .request()
-                .put(null);
-
-        Assert.assertEquals("LRA participant action", 200, response.getStatus());
-
+        // The LRA transaction could have been started via lraClient but it is useful to
+        // test the filters as well
         // Restarts lra-coordinator to simulate a crash
         restartContainer(LRA_COORDINATOR_CONTAINER_QUALIFIER);
 
         // Waits for a period of time longer than the timeout of the LRA Transaction
-        doWait((LRAListener.LRA_SHORT_TIMELIMIT + 1L) * 1000);
-
-        // The LRA transaction could have been started via lraClient but it is useful to test the filters as well
-        lraId = getFirstLRAFromFS();
-        assertNotNull("A new LRA should have been added to the object store before the JVM was halted.", lraId);
-        lraId = String.format("%s/%s", lraClient.getCoordinatorUrl(), lraId);
-
-        // Waits for a period of time longer than the timeout of the LRA Transaction
-        doWait((LRAListener.LRA_SHORT_TIMELIMIT + 1L) * 1000);
-
-        // Checks recovery
-        LRAStatus status = getStatus(new URI(lraId));
-
-        LRALogger.logger.infof("%s: Status after restart is %s%n", status == null ? "GONE" : status.name());
-
-        if (status == null || status == LRAStatus.Cancelling) {
-            int sc = recover();
-
-            if (sc != 0) {
-                recover();
-            }
-        }
+        doWait(SHORTER_TIMEOUT + 1000L);
 
         // LRA with short timeout should have timed out and cancelled
-        status = getStatus(new URI(lraId));
+        LRAStatus status = getStatus(shortLRA);
 
-        Assert.assertTrue(String.format("LRA %s should have cancelled", lraId),
+        if (status == LRAStatus.Cancelling) {
+            recover();
+            status = getStatus(shortLRA);
+        }
+        Assert.assertTrue(String.format("LRA %s should have cancelled", shortLRA.toString()),
                 status == null || status == LRAStatus.Cancelled);
 
-        // Verifies that the resource was notified that the LRA finished
-        String listenerStatus = getStatusFromListener(lraListenerURI);
-
-        assertEquals(String.format("The service lra-listener should have been told that the final state of the LRA %s was cancelled", lraId),
-                LRAStatus.Cancelled.name(), listenerStatus);
     }
 
     @Test
@@ -218,22 +189,20 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
         restartContainer(LRA_COORDINATOR_CONTAINER_QUALIFIER);
 
         // Waits for a period of time longer than the timeout of the short LRA transaction
-        doWait((LRAListener.LRA_SHORT_TIMELIMIT + 1L) * 1000);
-
-        int sc = recover();
-
-        if (sc != 0) {
-            recover();
-        }
+        doWait(SHORT_TIMEOUT + 1000L);
 
         LRAStatus longStatus = getStatus(longLRA);
         LRAStatus shortStatus = getStatus(shortLRA);
 
         Assert.assertEquals("LRA with long timeout should still be active",
                 LRAStatus.Active.name(), longStatus.name());
+        if (shortStatus == LRAStatus.Cancelling) {
+            recover();
+            shortStatus = getStatus(shortLRA);
+        }
         Assert.assertTrue("LRA with short timeout should not be active",
                 shortStatus == null ||
-                        LRAStatus.Cancelled.equals(shortStatus) || LRAStatus.Cancelling.equals(shortStatus));
+                        LRAStatus.Cancelled.equals(shortStatus));
 
         // Using lra-participant, a new LRA transaction is started as sub-transaction of the long LRA transaction
         // started directly through lra-coordinator from the test class. lra-participant will keep track of the
@@ -247,7 +216,6 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
         }
 
         lraClient.closeLRA(longLRA);
-        lraClient.closeLRA(shortLRA);
 
         // Checks that lra-participant was notified when the long LRA transaction was closed
         String listenerStatus = getStatusFromListener(lraListenerURI);

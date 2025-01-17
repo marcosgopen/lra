@@ -8,6 +8,7 @@ package io.narayana.lra.coordinator.tools.osb.mbean;
 import com.arjuna.ats.arjuna.common.recoveryPropertyManager;
 import com.arjuna.ats.arjuna.tools.osb.mbean.ActionBean;
 import com.arjuna.ats.arjuna.tools.osb.mbean.LogRecordWrapper;
+import com.arjuna.ats.arjuna.tools.osb.mbean.OSBTypeHandler;
 import com.arjuna.ats.arjuna.tools.osb.mbean.OSEntryBean;
 import com.arjuna.ats.arjuna.tools.osb.mbean.ObjStoreBrowser;
 import com.arjuna.ats.arjuna.tools.osb.mbean.UidWrapper;
@@ -23,6 +24,7 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.io.File;
 import java.net.URI;
 
 import static org.junit.Assert.assertEquals;
@@ -51,7 +53,11 @@ public class ObjStoreBrowserLRATest {
         // initiating the ObjStoreBrowser
         osb = new ObjStoreBrowser();
         for(String[] typeAndBean: LRA_OSB_TYPES) {
-            assertTrue(osb.addType(typeAndBean[0], typeAndBean[1], typeAndBean[2]));
+            osb.addType(typeAndBean[0], new OSBTypeHandler(true, true, typeAndBean[1], typeAndBean[2], typeAndBean[0], null, this.getClass().getClassLoader()));
+
+            String typeName = typeAndBean[0].replaceAll("/", File.separator);
+            osb.addType(typeName, new OSBTypeHandler(true, true, typeAndBean[1], typeAndBean[2], typeAndBean[0], null, this.getClass().getClassLoader()));
+//            assertTrue(osb.addType(typeAndBean[0], typeAndBean[1], typeAndBean[2]));
         }
         osb.start();
     }

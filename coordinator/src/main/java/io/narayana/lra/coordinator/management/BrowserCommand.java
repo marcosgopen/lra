@@ -222,7 +222,7 @@ public abstract class BrowserCommand {
         recoveryManager = new RecoveryManagerImple(false);
         recoveryManager.addModule(new LRARecoveryModule());
 
-        osb = new ObjStoreBrowser();
+        osb = ObjStoreBrowser.getInstance(null);
         for(String[] typeAndBean: LRA_OSB_TYPES) {
             osb.addType(typeAndBean[0], typeAndBean[1], typeAndBean[2]);
         }

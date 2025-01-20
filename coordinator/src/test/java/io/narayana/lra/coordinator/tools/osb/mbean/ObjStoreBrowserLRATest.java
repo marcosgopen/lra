@@ -51,13 +51,11 @@ public class ObjStoreBrowserLRATest {
         recoveryManager.addModule(new LRARecoveryModule());
 
         // initiating the ObjStoreBrowser
-        osb = new ObjStoreBrowser();
+        osb = ObjStoreBrowser.getInstance(null);
         for(String[] typeAndBean: LRA_OSB_TYPES) {
-            osb.addType(typeAndBean[0], new OSBTypeHandler(true, true, typeAndBean[1], typeAndBean[2], typeAndBean[0], null, this.getClass().getClassLoader()));
-
             String typeName = typeAndBean[0].replaceAll("/", File.separator);
-            osb.addType(typeName, new OSBTypeHandler(true, true, typeAndBean[1], typeAndBean[2], typeAndBean[0], null, this.getClass().getClassLoader()));
-//            assertTrue(osb.addType(typeAndBean[0], typeAndBean[1], typeAndBean[2]));
+            osb.addOSBTypeHandler(typeName, new OSBTypeHandler(true, true, typeAndBean[1], typeAndBean[2],
+                    typeAndBean[0], null, this.getClass().getClassLoader()));
         }
         osb.start();
     }

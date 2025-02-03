@@ -8,6 +8,7 @@ package io.narayana.lra.coordinator.tools.osb.mbean;
 import com.arjuna.ats.arjuna.common.recoveryPropertyManager;
 import com.arjuna.ats.arjuna.tools.osb.mbean.ActionBean;
 import com.arjuna.ats.arjuna.tools.osb.mbean.LogRecordWrapper;
+import com.arjuna.ats.arjuna.tools.osb.mbean.OSBTypeHandler;
 import com.arjuna.ats.arjuna.tools.osb.mbean.OSEntryBean;
 import com.arjuna.ats.arjuna.tools.osb.mbean.ObjStoreBrowser;
 import com.arjuna.ats.arjuna.tools.osb.mbean.UidWrapper;
@@ -23,6 +24,7 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.io.File;
 import java.net.URI;
 
 import static org.junit.Assert.assertEquals;
@@ -35,7 +37,7 @@ public class ObjStoreBrowserLRATest {
     private RecoveryManagerImple recoveryManager;
     private ObjStoreBrowser osb;
 
-    private static String[][] LRA_OSB_TYPES = {
+    private final static String[][] LRA_OSB_TYPES = {
             // osTypeClassName, beanTypeClassName - see com.arjuna.ats.arjuna.tools.osb.mbean.ObjStoreBrowser
             {LongRunningAction.getType().substring(1), LongRunningAction.class.getName(), LRAActionBean.class.getName()},
             {FailedLongRunningAction.getType().substring(1), FailedLongRunningAction.class.getName(), LRAActionBean.class.getName()}
@@ -49,9 +51,11 @@ public class ObjStoreBrowserLRATest {
         recoveryManager.addModule(new LRARecoveryModule());
 
         // initiating the ObjStoreBrowser
-        osb = new ObjStoreBrowser();
+        osb = ObjStoreBrowser.getInstance();
         for(String[] typeAndBean: LRA_OSB_TYPES) {
-            assertTrue(osb.addType(typeAndBean[0], typeAndBean[1], typeAndBean[2]));
+            String typeName = typeAndBean[0].replace("/", File.separator);
+            osb.addOSBTypeHandler(typeName, new OSBTypeHandler(true, true, typeAndBean[1], typeAndBean[2],
+                    typeAndBean[0], null, this.getClass().getClassLoader()));
         }
         osb.start();
     }

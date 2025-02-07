@@ -167,14 +167,16 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
 
         // Waits for a period of time longer than the timeout of the LRA Transaction
         doWait((LRAListener.LRA_SHORT_TIMELIMIT + 1L) * 1000);
-        // the recovery is started during the server restart asynchronously, so calling
-        // a synchronous recovery to make sure the recovery is finished
-        while (recover() != 0);
 
         // Checks recovery
         LRAStatus status = getStatus(new URI(lraId));
 
         LRALogger.logger.infof("%s: Status after restart is %s%n", status == null ? "GONE" : status.name());
+
+        // In case the recovery cycle that should have started when WildFly re-started has not completed, force a single recovery cycle
+        if (status == null || status == LRAStatus.Cancelling) {
+            recover();
+        }
 
         // LRA with short timeout should have timed out and cancelled
         status = getStatus(new URI(lraId));
@@ -208,9 +210,9 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
         // Waits for a period of time longer than the timeout of the short LRA
         // transaction
         doWait(SHORT_TIMEOUT + 1000);
-        // the recovery is started during the server restart asynchronously, so calling
-        // a synchronous recovery to make sure the recovery is finished
-        while (recover() != 0);
+
+        // In case the recovery cycle that should have started when WildFly re-started has not completed, force a single recovery cycle
+        recover();
 
         LRAStatus longStatus = getStatus(longLRA);
         LRAStatus shortStatus = getStatus(shortLRA);

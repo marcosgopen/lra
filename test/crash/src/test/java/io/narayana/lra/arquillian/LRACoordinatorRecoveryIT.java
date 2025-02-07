@@ -174,9 +174,9 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
         LRALogger.logger.infof("%s: Status after restart is %s%n", status == null ? "GONE" : status.name());
 
         // In case the recovery cycle that should have started when WildFly re-started has not completed, force a single recovery cycle
-        if (status == null || status == LRAStatus.Cancelling) {
+//        if (status == null || status == LRAStatus.Cancelling) {
             recover();
-        }
+//        }
 
         // LRA with short timeout should have timed out and cancelled
         status = getStatus(new URI(lraId));

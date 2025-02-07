@@ -166,20 +166,20 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
         restartContainer(LRA_COORDINATOR_CONTAINER_QUALIFIER);
 
         // Waits for a period of time longer than the timeout of the LRA Transaction
-        doWait((LRAListener.LRA_SHORT_TIMELIMIT + 1L) * 1000);
+        doWait((LRAListener.LRA_SHORT_TIMELIMIT + 4L) * 1000);
 
         // Checks recovery
         LRAStatus status = getStatus(new URI(lraId));
 
         LRALogger.logger.infof("%s: Status after restart is %s%n", status == null ? "GONE" : status.name());
 
-        // In case the recovery cycle that should have started when WildFly re-started has not completed, force a single recovery cycle
-//        if (status == null || status == LRAStatus.Cancelling) {
-            recover();
-//        }
-
-        // LRA with short timeout should have timed out and cancelled
-        status = getStatus(new URI(lraId));
+//        // In case the recovery cycle that should have started when WildFly re-started has not completed, force a single recovery cycle
+////        if (status == null || status == LRAStatus.Cancelling) {
+//            recover();
+////        }
+//
+//        // LRA with short timeout should have timed out and cancelled
+//        status = getStatus(new URI(lraId));
 
         // null status is also accepted because the lra has already been cancelled and
         // removed
@@ -209,10 +209,10 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
 
         // Waits for a period of time longer than the timeout of the short LRA
         // transaction
-        doWait(SHORT_TIMEOUT + 1000);
+        doWait(SHORT_TIMEOUT + 4000);
 
-        // In case the recovery cycle that should have started when WildFly re-started has not completed, force a single recovery cycle
-        recover();
+//        // In case the recovery cycle that should have started when WildFly re-started has not completed, force a single recovery cycle
+//        recover();
 
         LRAStatus longStatus = getStatus(longLRA);
         LRAStatus shortStatus = getStatus(shortLRA);

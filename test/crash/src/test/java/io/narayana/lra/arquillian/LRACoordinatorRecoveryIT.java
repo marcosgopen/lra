@@ -183,7 +183,7 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
 
         // null status is also accepted because the lra has already been cancelled and
         // removed
-        Assert.assertTrue(String.format("LRA %s should have cancelled", lraId),
+        Assert.assertTrue(String.format("LRA %s should have cancelled but was %s", lraId, status),
                 status == null || status == LRAStatus.Cancelled);
 
         // Verifies that the resource was notified that the LRA finished

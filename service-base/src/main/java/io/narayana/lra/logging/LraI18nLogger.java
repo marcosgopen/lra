@@ -172,6 +172,9 @@ public interface LraI18nLogger {
     @Message(id = 25044, value = "%s is not a valid URI (%s)")
     String warn_invalid_uri(String uri, String location);
 
+    @Message(id = 25045, value = "%d nanos timelimit is too long and so will be set to %d nanos")
+    String warn_timelimit_too_long(long timeLimit, long newTimeLimit);
+
     /*
         Allocate new messages directly above this notice.
           - id: use the next id number in numeric sequence. Don't reuse ids.

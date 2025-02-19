@@ -1120,9 +1120,18 @@ public class LongRunningAction extends BasicAction {
             return Response.Status.PRECONDITION_FAILED.getStatusCode();
         }
 
+        Long nanosToAdd = timeLimit;
+        try {
+            nanosToAdd = Math.multiplyExact(timeLimit, 1000000);
+        }
+        catch (ArithmeticException e) {
+            LRALogger.logger.warn(
+                    LRALogger.i18nLogger.warn_timelimit_too_long(timeLimit, Long.MAX_VALUE));
+            nanosToAdd = Long.MAX_VALUE;
+        }
         if (finishTime != null) {
             // check whether the new time limit is less than the current one
-            LocalDateTime ft = LocalDateTime.now(ZoneOffset.UTC).plusNanos(timeLimit * 1000000);
+            LocalDateTime ft = LocalDateTime.now(ZoneOffset.UTC).plusNanos(nanosToAdd);
 
             if (ft.isAfter(finishTime)) {
                 // the existing timer finishes before the requested one so there is nothing to do
@@ -1140,7 +1149,7 @@ public class LongRunningAction extends BasicAction {
             }
         } else {
             // if timeLimit is negative the abort will be scheduled immediately
-            finishTime = LocalDateTime.now(ZoneOffset.UTC).plusNanos(timeLimit * 1000000);
+            finishTime = LocalDateTime.now(ZoneOffset.UTC).plusNanos(nanosToAdd);
         }
 
         if (LRALogger.logger.isTraceEnabled()) {

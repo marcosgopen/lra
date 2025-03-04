@@ -5,24 +5,46 @@
 
 package io.narayana.lra.arquillian.spi;
 
-import io.narayana.lra.LRAConstants;
+import static io.narayana.lra.LRAConstants.RECOVERY_COORDINATOR_PATH_NAME;
+
+import java.net.URI;
+
+import org.eclipse.microprofile.lra.annotation.LRAStatus;
 import org.eclipse.microprofile.lra.tck.service.spi.LRARecoveryService;
 import org.jboss.logging.Logger;
 
+import io.narayana.lra.LRAConstants;
 import jakarta.ws.rs.client.Client;
 import jakarta.ws.rs.client.ClientBuilder;
 import jakarta.ws.rs.client.WebTarget;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriBuilder;
-import java.net.URI;
-import static io.narayana.lra.LRAConstants.RECOVERY_COORDINATOR_PATH_NAME;
 
 public class NarayanaLRARecovery implements LRARecoveryService {
     private static final Logger log = Logger.getLogger(NarayanaLRARecovery.class);
 
+    /*
+     * invoke the LRAParticipant.status(URI lraId, URI parentId) if that returns 200
+     * then ok if that returns 202 then repeat
+     * 
+     */
     @Override
     public void waitForCallbacks(URI lraId) {
-        // no action needed
+        int counter = 0;
+        Response response;
+        String status;
+        do {
+            log.info("Checking if the CompletionStage has finished, attempt #" + ++counter);
+            log.info("waitForCallbacks for: " + lraId.toASCIIString());
+            try (Client client = ClientBuilder.newClient()) {
+                WebTarget coordinatorTarget = client.target(UriBuilder.fromUri(lraId).path("status").build());
+                response = coordinatorTarget.request().get();
+                status = response.readEntity(String.class);
+                response.close();
+            }
+        }
+        while (LRAStatus.Cancelling.name().equals(status) || LRAStatus.Closing.name().equals(status));
+        log.info("LRA " + lraId + "has received the callback");
     }
 
     @Override

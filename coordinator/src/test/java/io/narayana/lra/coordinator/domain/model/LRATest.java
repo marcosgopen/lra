@@ -582,7 +582,7 @@ public class LRATest extends LRATestBase {
             } catch (JsonProcessingException | URISyntaxException e) {
                 fail("Unable to parse JSON response: " + json);
             } catch (WebApplicationException e) {
-                fail("Unable to close lra: " + lraId);;
+                fail("Unable to close lra: " + lraId);
             }
         }
     }
@@ -1210,7 +1210,7 @@ public class LRATest extends LRATestBase {
 
                 fail("LRA should have gone but it is in state " + status);
             } catch (NotFoundException ignore) {
-                ; // success the LRA is gone as expected
+                // success the LRA is gone as expected
             } catch (WebApplicationException e) {
                 assertEquals("status of LRA unavailable: " + e.getMessage(),
                         NOT_FOUND.getStatusCode(), e.getResponse().getStatus());

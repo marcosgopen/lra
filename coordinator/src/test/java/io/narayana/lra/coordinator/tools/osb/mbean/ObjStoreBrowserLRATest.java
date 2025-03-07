@@ -37,7 +37,7 @@ public class ObjStoreBrowserLRATest {
     private RecoveryManagerImple recoveryManager;
     private ObjStoreBrowser osb;
 
-    private final static String[][] LRA_OSB_TYPES = {
+    private static final String[][] LRA_OSB_TYPES = {
             // osTypeClassName, beanTypeClassName - see com.arjuna.ats.arjuna.tools.osb.mbean.ObjStoreBrowser
             {LongRunningAction.getType().substring(1), LongRunningAction.class.getName(), LRAActionBean.class.getName()},
             {FailedLongRunningAction.getType().substring(1), FailedLongRunningAction.class.getName(), LRAActionBean.class.getName()}

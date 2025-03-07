@@ -210,7 +210,9 @@ public abstract class BrowserCommand {
             printStream.printf("%s - %s%n", name.name().toLowerCase(), name.cmdHelp);
     }
 
-    boolean cancel() {return true;}
+    boolean cancel() {
+        return true;
+    }
 
     private static void setupStore(String storeDir) throws Exception {
         recoveryPropertyManager.getRecoveryEnvironmentBean().setRecoveryBackoffPeriod(1);
@@ -238,7 +240,7 @@ public abstract class BrowserCommand {
 
         if (hqstore) {
             File hornetqStoreDir = new File(storeDir);
-            String storeClassName =  com.arjuna.ats.internal.arjuna.objectstore.hornetq.HornetqObjectStoreAdaptor.class.getName();
+            String storeClassName = HornetqObjectStoreAdaptor.class.getName();
 
             BeanPopulator.getDefaultInstance(HornetqJournalEnvironmentBean.class)
                     .setStoreDir(hornetqStoreDir.getCanonicalPath());

@@ -34,8 +34,7 @@ public class NarayanaLRARecovery implements LRARecoveryService {
      */
     @Override
     public void waitForCallbacks(URI lraId) {
-        log.info("Wait for the callback to be returned by the CompletionStage");
-        log.info("waitForCallbacks for: " + lraId.toASCIIString());
+        log.trace("waitForCallbacks for: " + lraId.toASCIIString());
         try {
             Thread.sleep(WAIT_CALLBACK_TIMEOUT);
         }
@@ -46,7 +45,7 @@ public class NarayanaLRARecovery implements LRARecoveryService {
 
     @Override
     public boolean waitForEndPhaseReplay(URI lraId) {
-        log.info("waitForEndPhaseReplay for: " + lraId.toASCIIString());
+        log.trace("waitForEndPhaseReplay for: " + lraId.toASCIIString());
         if (!recoverLRAs(lraId)) {
             // first recovery scan probably collided with periodic recovery which started
             // before the test execution so try once more

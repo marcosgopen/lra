@@ -1,0 +1,49 @@
+name: JACOCO-PROFILE
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  core-test:
+    name: JACOCO test with JDK ${{ matrix.java-version }}
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        java-version: [ 21 ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          repository: jbosstm/lra
+          ref: main
+
+      - uses: actions/setup-java@v1
+        name: Set up JDK ${{ matrix.java-version }}
+        with:
+          java-version: ${{ matrix.java-version }}
+
+      - name: JACOCO test
+        run: |
+          git config --global user.email "lra@jbosstm.com"
+          git config --global user.name "lra-bot"
+          WORKSPACE=$PWD PROFILE=JACOCO ./scripts/hudson/narayana.sh
+        env:
+          LRA_TCK_TIMEOUT_FACTOR: 1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-logs-jdk${{ matrix.java-version }}
+          path: |
+            jboss-as/dist/target/wildfly-*/standalone/log/
+            **/ObjectStore*/**
+            **/tx-object-store/**
+            **/*tx-object-store.zip
+            **/target/*failsafe-reports*/**
+            **/target/site/**
+            **/*.exec
+            *.csv
+          if-no-files-found: error

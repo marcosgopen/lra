@@ -86,7 +86,7 @@ function init_test_options {
     [ $CODE_COVERAGE ] || CODE_COVERAGE=0
     [ x"$CODE_COVERAGE_ARGS" != "x" ] || CODE_COVERAGE_ARGS=""
     [ $ARQ_PROF ] || ARQ_PROF=arq	# IPv4 arquillian profile
-    [ $USE_LATEST_COORDINATOR] || USE_LATEST_COORDINATOR=" -Pdeploy.lra.coordinator"	# use the built coordinator
+    [ $USE_LATEST_COORDINATOR] || USE_LATEST_COORDINATOR="" # use -Pdeploy.lra.coordinator for the built coordinator
     [ $ENABLE_LRA_TRACE_LOGS ] || ENABLE_LRA_TRACE_LOGS=" -Dtest.logs.to.file=true -Dtrace.lra.coordinator"
 
     if ! get_pull_xargs "$PULL_DESCRIPTION_BODY" $PROFILE; then # see if the PR description overrides the profile

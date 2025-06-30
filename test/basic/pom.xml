@@ -80,5 +80,78 @@
       </plugin>
     </plugins>
   </build>
+    <!-- 
+      This profile will deploy the coordinator build by this project as a war file.
+      If not activated, the tests will use the build-in coordinator of the target WildFly instance 
+      (so whatever has been build for the coordinator would be ignored then) 
+    -->
+    <profile>
+      <id>deploy.lra.coordinator</id>
+      <activation>
+        <property>
+          <name>deploy.coordinator</name>
+        </property>
+      </activation>
+      <properties>
+        <deploy.coordinator>true</deploy.coordinator>
+      </properties>
 
+      <dependencies>
+        <dependency>
+          <groupId>org.jboss.narayana.lra</groupId>
+          <artifactId>lra-coordinator-war</artifactId>
+          <type>war</type>
+        </dependency>
+      </dependencies>
+
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.wildfly.plugins</groupId>
+            <artifactId>wildfly-maven-plugin</artifactId>
+            <version>${version.wildfly-maven-plugin}</version>
+            <configuration>
+              <skip>${skip.wildfly.plugin}</skip>
+            </configuration>
+
+            <executions>
+              <!-- Deploys to Wildfly -->
+              <execution>
+                <id>start</id>
+                <goals>
+                  <goal>deploy-artifact</goal>
+                </goals>
+                <phase>pre-integration-test</phase>
+                <configuration>
+                  <groupId>org.jboss.narayana.lra</groupId>
+                  <artifactId>lra-coordinator-war</artifactId>
+                  <name>${lra.coordinator.war.name}</name>
+                  <force>true</force>
+                </configuration>
+              </execution>
+
+              <!-- Undeploys Wildfly -->
+              <execution>
+                <id>undeploy</id>
+                <goals>
+                  <goal>undeploy</goal>
+                </goals>
+                <phase>post-integration-test</phase>
+                <configuration>
+                  <name>lra-coordinator.war</name>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+              <excludes>
+                <exclude>**/OpenAPIIT.java</exclude>
+              </excludes>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
 </project>

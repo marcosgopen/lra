@@ -23,6 +23,9 @@ public class Deployer {
 
                 // Additional Services to deploy
                 .addClasses(classes)
+                .addPackages(true,
+                        "io.smallrye.stork",
+                        "io.smallrye.mutiny")
                 // Support libraries
                 .addAsLibraries(Maven.resolver()
                         .resolve("org.jboss.resteasy:resteasy-client:" + resteasyClientVersion,

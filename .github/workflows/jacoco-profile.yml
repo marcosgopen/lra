@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         
-      - name: Check for `testing/jacoco` label
+      - name: Check for `skip-tests` label
         id: check-label
         run: |
           echo "should_skip=false" >> $GITHUB_OUTPUT
@@ -30,8 +30,8 @@ jobs:
             echo "Checking labels on PR #${{ github.event.pull_request.number }}..."
             LABELS=$(gh pr view ${{ github.event.pull_request.number }} --json labels --jq '.labels[].name')
             echo "Labels found: $LABELS"
-            if ! echo "$LABELS" | grep -q "^testing/jacoco$"; then
-              echo "Label 'testing/jacoco' not found. Skipping job."
+            if echo "$LABELS" | grep "skip-tests"; then
+              echo "Label 'skip-tests' found. Skipping job."
               echo "should_skip=true" >> $GITHUB_OUTPUT
             fi
           fi

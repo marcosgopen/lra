@@ -18,7 +18,8 @@ jobs:
 
       - uses: actions/setup-java@v5
         with:
-          java-version: 17 # minimum supported JDK
+          distribution: 'temurin'
+          java-version: '21'
 
       - name: Verify pull request format
         run: ./mvnw formatter:validate

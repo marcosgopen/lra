@@ -17,7 +17,7 @@ jobs:
         java-version: [ 17, 21 ]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         
       - name: Check for `skip-tests` label
         id: check-label

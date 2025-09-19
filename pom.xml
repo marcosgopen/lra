@@ -117,7 +117,7 @@
     <version.doxia>1.8.1</version.doxia>
     <version.formatter.plugin>2.26.0</version.formatter.plugin>
 
-    <version.hamcrest>2.2</version.hamcrest>
+    <version.hamcrest>3.0</version.hamcrest>
     <version.httpcomponents>4.5.14</version.httpcomponents>
     <version.io.narayana.checkstyle-config>1.0.1.Final</version.io.narayana.checkstyle-config>
     <version.io.netty>4.2.6.Final</version.io.netty>

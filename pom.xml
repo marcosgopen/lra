@@ -115,7 +115,7 @@
     <version.com.github.spotbugs.spotbugs-maven-plugin>4.8.3.1</version.com.github.spotbugs.spotbugs-maven-plugin>
     <version.com.h2database>2.2.224</version.com.h2database>
     <version.doxia>1.8.1</version.doxia>
-    <version.formatter.plugin>2.26.0</version.formatter.plugin>
+    <version.formatter.plugin>2.29.0</version.formatter.plugin>
 
     <version.hamcrest>2.2</version.hamcrest>
     <version.httpcomponents>4.5.14</version.httpcomponents>

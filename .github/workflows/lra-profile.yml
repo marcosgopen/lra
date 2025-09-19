@@ -6,11 +6,6 @@ on:
     types: [ opened, edited, synchronize, ready_for_review, labeled, unlabeled, reopened ]
   workflow_dispatch:
 
-# Only run the latest job
-concurrency:
-  group: '${{ github.workflow }} @ ${{ github.head_ref || github.ref }}'
-  cancel-in-progress: true
-
 jobs:
   lra-test:
     name: LRA test with JDK ${{ matrix.java-version }}

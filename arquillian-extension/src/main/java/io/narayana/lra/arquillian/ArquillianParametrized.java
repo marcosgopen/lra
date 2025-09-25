@@ -26,6 +26,9 @@ import org.junit.runners.model.InitializationError;
  * <p>
  * Adjusted from the HAL testsuite (<a href="https://github.com/hal/testsuite">...</a>).
  */
+// Deprecating this class as it is intended for junit4 framework
+// which will be soon upgraded to junit5 in next minor
+@Deprecated
 public class ArquillianParametrized extends ParentRunner<Arquillian> {
 
     private final List<Arquillian> arquillians = new ArrayList<>();

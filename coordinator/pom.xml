@@ -164,7 +164,6 @@
   </dependencies>
 
   <build>
-    <finalName>lra-coordinator</finalName>
     <testResources>
       <testResource>
         <directory>src/test/resources</directory>

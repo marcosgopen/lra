@@ -251,7 +251,7 @@ public class NarayanaLRAClient implements Closeable {
         } else {
             String coordinators = getConfigProperty(COORDINATOR_URLS_KEY, coordinatorUrl.toASCIIString());
 
-            this.coordinatorUrl = toURI(coordinators.split(",")[0]);
+            this.coordinatorUrl = toURI(coordinatorUrl.toASCIIString());
             this.coordinatorCount = coordinators.chars().filter(ch -> ch == ',').count() + 1;
 
             try {

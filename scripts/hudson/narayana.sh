@@ -235,7 +235,8 @@ function clone_as {
     [ $? -eq 0 ] || fatal "git rebase jbosstm failed"
   else
     echo "First time checkout of WildFly"
-    git clone https://github.com/jbosstm/jboss-as.git -o jbosstm
+    # Use --single-branch to clone only the main branch, reducing clone time and bandwidth
+    git clone --single-branch https://github.com/jbosstm/jboss-as.git -o jbosstm
     [ $? -eq 0 ] || fatal "git clone https://github.com/jbosstm/jboss-as.git failed"
 
     cd jboss-as

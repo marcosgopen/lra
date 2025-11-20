@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 120
     strategy:
       matrix:
-        java-version: [ 17, 21 ]
+        java-version: [ 17, 21, 25 ]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -66,7 +66,7 @@ jobs:
         env:
           LRA_TCK_TIMEOUT_FACTOR: 1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: steps.check-label.outputs.should_skip != 'true' && always()
         with:
           name: lra-logs-jdk${{ matrix.java-version }}

@@ -112,6 +112,7 @@
     <test.logs.to.file>false</test.logs.to.file>
     <!-- The surefire/failsafe test execution logs goes to a file by default -->
     <testLogToFile>true</testLogToFile>
+    <version.assertj>3.27.6</version.assertj>
     <version.com.github.spotbugs.spotbugs-maven-plugin>4.9.8.2</version.com.github.spotbugs.spotbugs-maven-plugin>
     <version.com.h2database>2.4.240</version.com.h2database>
     <version.doxia>1.11.1</version.doxia>
@@ -131,6 +132,7 @@
     <version.jakarta.ws.rs.jakarta-ws-rs-api>3.1.0</version.jakarta.ws.rs.jakarta-ws-rs-api>
     <version.jboss-modules>2.2.0.Final</version.jboss-modules>
     <version.junit>5.13.4</version.junit>
+    <version.junit.jupiter>5.13.4</version.junit.jupiter>
     <version.maven.antrun-plugin>3.0.0</version.maven.antrun-plugin>
     <version.maven.checkstyle-plugin>3.6.0</version.maven.checkstyle-plugin>
     <version.maven.jandex-plugin>3.5.2</version.maven.jandex-plugin>
@@ -142,12 +144,13 @@
 
     <!-- Needed for WildflyLRACoordinatorDeployment class -->
     <version.microprofile.lra>2.0.1</version.microprofile.lra>
+    <version.mockito>5.20.0</version.mockito>
     <version.org.apache.activemq>2.41.0</version.org.apache.activemq>
     <version.org.codehaus.mojo.jboss-maven-plugin>1.5.0</version.org.codehaus.mojo.jboss-maven-plugin>
     <version.org.eclipse.microprofile.openapi>4.1.1</version.org.eclipse.microprofile.openapi>
+    <version.org.jacoco>0.8.14</version.org.jacoco>
 
     <version.org.jboss.arquillian.core>1.10.0.Final</version.org.jboss.arquillian.core>
-    <version.org.jacoco>0.8.14</version.org.jacoco>
     <version.org.jboss.as.plugins.jboss-as-maven-plugin>7.9.Final</version.org.jboss.as.plugins.jboss-as-maven-plugin>
     <version.org.jboss.byteman>4.0.25</version.org.jboss.byteman>
     <version.org.jboss.logging.jboss-logging>3.6.1.Final</version.org.jboss.logging.jboss-logging>
@@ -600,38 +603,11 @@
                 </pluginExecution>
                 <pluginExecution>
                   <pluginExecutionFilter>
-                    <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-antrun-plugin</artifactId>
-                    <versionRange>[1.7,)</versionRange>
-                    <goals>
-                      <goal>run</goal>
-                    </goals>
-                  </pluginExecutionFilter>
-                  <action>
-                    <ignore></ignore>
-                  </action>
-                </pluginExecution>
-                <pluginExecution>
-                  <pluginExecutionFilter>
                     <groupId>org.codehaus.mojo</groupId>
                     <artifactId>build-helper-maven-plugin</artifactId>
                     <versionRange>[1.7,)</versionRange>
                     <goals>
                       <goal>add-source</goal>
-                    </goals>
-                  </pluginExecutionFilter>
-                  <action>
-                    <ignore></ignore>
-                  </action>
-                </pluginExecution>
-                <pluginExecution>
-                  <pluginExecutionFilter>
-                    <groupId>org.codehaus.mojo</groupId>
-                    <artifactId>idlj-maven-plugin</artifactId>
-                    <versionRange>[1.2.1,)</versionRange>
-                    <goals>
-                      <goal>generate</goal>
-                      <goal>generate-test</goal>
                     </goals>
                   </pluginExecutionFilter>
                   <action>

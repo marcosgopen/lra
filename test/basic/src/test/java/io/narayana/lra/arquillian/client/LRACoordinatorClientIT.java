@@ -8,23 +8,17 @@ package io.narayana.lra.arquillian.client;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.narayana.lra.LRAData;
-import io.narayana.lra.arquillian.Deployer;
 import io.narayana.lra.client.api.LRACoordinatorClient;
 import io.narayana.lra.client.api.LRACoordinatorClientBuilder;
 import io.narayana.lra.client.api.LRAResponseUtils;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.net.URI;
-import java.net.URL;
 import java.util.List;
 import java.util.Optional;
 import org.eclipse.microprofile.lra.annotation.LRAStatus;
-import org.jboss.arquillian.container.test.api.Deployment;
-import org.jboss.arquillian.test.api.ArquillianResource;
-import org.jboss.shrinkwrap.api.spec.WebArchive;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
 
 /**
  * Integration tests for LRA Coordinator Client.
@@ -33,23 +27,16 @@ import org.junit.jupiter.api.extension.ExtendWith;
  * To enable these tests, run with:
  * -Dlra.coordinator.test.enabled=true -Dlra.coordinator.url=http://localhost:8080
  */
-@ExtendWith(ArquillianExtension.class)
 @DisplayName("LRA Coordinator Client Integration Tests")
 class LRACoordinatorClientIT {
 
-    @ArquillianResource
-    public URL baseUrl;
-
-    @Deployment
-    public static WebArchive deploy() {
-        return Deployer.deploy(LRACoordinatorClientIT.class.getSimpleName());
-    }
+    public String defaultCoordinatorUrl = "http://localhost:8080/lra-coordinator/";
 
     @Test
     @DisplayName("Should perform complete LRA lifecycle")
     void shouldPerformCompleteLRALifecycle() {
         try (LRACoordinatorClient client = LRACoordinatorClientBuilder.newBuilder()
-                .coordinatorUrl(baseUrl.toString())
+                .coordinatorUrl(defaultCoordinatorUrl)
                 .build()) {
 
             // 1. Start a new LRA
@@ -118,7 +105,7 @@ class LRACoordinatorClientIT {
     @DisplayName("Should handle LRA cancellation")
     void shouldHandleLRACancellation() {
         try (LRACoordinatorClient client = LRACoordinatorClientBuilder.newBuilder()
-                .coordinatorUrl(baseUrl.toString())
+                .coordinatorUrl(defaultCoordinatorUrl)
                 .build()) {
 
             // Start LRA
@@ -150,7 +137,7 @@ class LRACoordinatorClientIT {
     @DisplayName("Should handle nested LRA creation")
     void shouldHandleNestedLRACreation() {
         try (LRACoordinatorClient client = LRACoordinatorClientBuilder.newBuilder()
-                .coordinatorUrl(baseUrl.toString())
+                .coordinatorUrl(defaultCoordinatorUrl)
                 .build()) {
 
             // Start parent LRA
@@ -187,7 +174,7 @@ class LRACoordinatorClientIT {
     @DisplayName("Should handle timeout renewal")
     void shouldHandleTimeoutRenewal() {
         try (LRACoordinatorClient client = LRACoordinatorClientBuilder.newBuilder()
-                .coordinatorUrl(baseUrl.toString())
+                .coordinatorUrl(defaultCoordinatorUrl)
                 .build()) {
 
             // Start LRA with short timeout

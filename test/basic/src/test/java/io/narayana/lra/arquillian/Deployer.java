@@ -29,6 +29,7 @@ public class Deployer {
                         "io.narayana.lra.provider",
                         "io.narayana.lra.client",
                         "io.narayana.lra.client.internal",
+                        "io.narayana.lra.client.api",
                         "io.narayana.lra.arquillian.spi",
                         "io.smallrye.stork",
                         "io.smallrye.mutiny", // recursive addPacakges doesn't seem to resolve the missing classes, so:

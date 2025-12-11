@@ -24,6 +24,7 @@ import java.util.stream.Collectors;
 import org.jboss.arquillian.container.test.api.RunAsClient;
 import org.jboss.arquillian.junit.Arquillian;
 import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -62,6 +63,11 @@ public abstract class TestBase {
         if (client != null) {
             client.close();
         }
+    }
+
+    @AfterClass
+    public static void afterClass() {
+        lraClient.close();
     }
 
     protected JsonArray getAllRecords(URI lra) {

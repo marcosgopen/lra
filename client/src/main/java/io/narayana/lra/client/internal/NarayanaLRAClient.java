@@ -44,6 +44,7 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.client.ClientRequestFilter;
 import jakarta.ws.rs.container.Suspended;
 import jakarta.ws.rs.core.GenericType;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -52,6 +53,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriBuilder;
 import java.io.Closeable;
+import java.io.FileInputStream;
+import java.io.InputStream;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
 import java.net.MalformedURLException;
@@ -60,6 +63,8 @@ import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
@@ -68,6 +73,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
 import org.eclipse.microprofile.config.Config;
 import org.eclipse.microprofile.config.ConfigProvider;
 import org.eclipse.microprofile.lra.annotation.AfterLRA;
@@ -96,6 +104,18 @@ public class NarayanaLRAClient implements Closeable {
      * The config property key for configuring the load balancing algorithm for a cluster of coordinators
      */
     public static final String COORDINATOR_LB_METHOD_KEY = "lra.coordinator.lb-method";
+
+    /**
+     * SSL Configuration keys
+     */
+    public static final String SSL_TRUSTSTORE_PATH_KEY = "lra.coordinator.ssl.truststore.path";
+    public static final String SSL_TRUSTSTORE_PASSWORD_KEY = "lra.coordinator.ssl.truststore.password";
+    public static final String SSL_TRUSTSTORE_TYPE_KEY = "lra.coordinator.ssl.truststore.type";
+    public static final String SSL_KEYSTORE_PATH_KEY = "lra.coordinator.ssl.keystore.path";
+    public static final String SSL_KEYSTORE_PASSWORD_KEY = "lra.coordinator.ssl.keystore.password";
+    public static final String SSL_KEYSTORE_TYPE_KEY = "lra.coordinator.ssl.keystore.type";
+    public static final String SSL_VERIFY_HOSTNAME_KEY = "lra.coordinator.ssl.verify-hostname";
+    public static final String SSL_CONTEXT_KEY = "lra.coordinator.ssl.context";
 
     // Load balancing algorithms.
     // The values must match what Stork uses (remark Stork does not define any constants)
@@ -139,6 +159,9 @@ public class NarayanaLRAClient implements Closeable {
     private boolean supportsFailover;
     private boolean storkInitialised;
     private LRACoordinatorService coordinatorRestClient;
+    private ClientRequestFilter authenticationFilter;
+    private SSLContext sslContext;
+    private boolean hostnameVerificationEnabled = true;
 
     /**
      * Creating LRA client. The URL of the LRA coordinator will be taken
@@ -189,6 +212,67 @@ public class NarayanaLRAClient implements Closeable {
         clusterConfig(toURI(coordinatorUrl));
     }
 
+    /**
+     * Sets the authentication filter to be used for coordinator requests.
+     * This filter will be registered with all REST clients created by this instance.
+     * The REST client will be automatically reinitialized with the new authentication settings.
+     *
+     * @param filter the ClientRequestFilter to use for authentication (may be null to disable)
+     */
+    public void setAuthenticationFilter(ClientRequestFilter filter) {
+        this.authenticationFilter = filter;
+        reinitializeRestClient();
+    }
+
+    /**
+     * Gets the currently configured authentication filter.
+     *
+     * @return the authentication filter, or null if none is configured
+     */
+    public ClientRequestFilter getAuthenticationFilter() {
+        return this.authenticationFilter;
+    }
+
+    /**
+     * Sets the SSL context to be used for HTTPS connections to coordinators.
+     * The REST client will be automatically reinitialized with the new SSL settings.
+     *
+     * @param sslContext the SSLContext to use (may be null for default)
+     */
+    public void setSslContext(SSLContext sslContext) {
+        this.sslContext = sslContext;
+        reinitializeRestClient();
+    }
+
+    /**
+     * Gets the currently configured SSL context.
+     *
+     * @return the SSL context, or null if using default
+     */
+    public SSLContext getSslContext() {
+        return this.sslContext;
+    }
+
+    /**
+     * Sets whether hostname verification should be enabled for SSL connections.
+     * The REST client will be automatically reinitialized with the new verification settings.
+     *
+     * @param enabled true to enable hostname verification, false to disable
+     */
+    public void setHostnameVerificationEnabled(boolean enabled) {
+        this.hostnameVerificationEnabled = enabled;
+        reinitializeRestClient();
+    }
+
+    /**
+     * Gets whether hostname verification is enabled.
+     *
+     * @return true if hostname verification is enabled
+     */
+    public boolean isHostnameVerificationEnabled() {
+        return this.hostnameVerificationEnabled;
+    }
+
     private URI toURI(String coordinatorUrl) {
         try {
             return new URI(coordinatorUrl);
@@ -209,6 +293,125 @@ public class NarayanaLRAClient implements Closeable {
         }
 
         return defaultValue;
+    }
+
+    /**
+     * Configures a RestClientBuilder with authentication and SSL settings.
+     *
+     * @param builder the RestClientBuilder to configure
+     * @return the configured RestClientBuilder
+     */
+    private RestClientBuilder configureRestClient(RestClientBuilder builder) {
+        // Configure authentication
+        if (authenticationFilter != null) {
+            builder.register(authenticationFilter);
+        }
+
+        // Configure SSL
+        if (sslContext != null) {
+            builder.sslContext(sslContext);
+        } else {
+            // Try to create SSL context from configuration
+            SSLContext configuredSslContext = createSslContextFromConfig();
+            if (configuredSslContext != null) {
+                builder.sslContext(configuredSslContext);
+            }
+        }
+
+        // Configure hostname verification
+        if (!hostnameVerificationEnabled) {
+            builder.hostnameVerifier((hostname, session) -> true);
+        } else {
+            // Check configuration for hostname verification
+            boolean verifyFromConfig = getConfigProperty(SSL_VERIFY_HOSTNAME_KEY, "true").equals("true");
+            if (!verifyFromConfig) {
+                builder.hostnameVerifier((hostname, session) -> true);
+            }
+        }
+
+        return builder;
+    }
+
+    /**
+     * Initializes and configures the REST client for coordinator communication.
+     *
+     * @param coordinatorUri the URI of the coordinator to connect to
+     */
+    private void initializeCoordinatorRestClient(URI coordinatorUri) {
+        this.coordinatorRestClient = configureRestClient(RestClientBuilder.newBuilder().baseUri(coordinatorUri))
+                .build(LRACoordinatorService.class);
+    }
+
+    /**
+     * Reinitializes the coordinator REST client with current configuration.
+     * This is useful when authentication or SSL settings have been changed
+     * after the client was initially created.
+     */
+    public void reinitializeRestClient() {
+        if (coordinatorUrl != null) {
+            initializeCoordinatorRestClient(coordinatorUrl);
+        }
+    }
+
+    /**
+     * Creates an SSL context from configuration properties if available.
+     *
+     * @return configured SSLContext or null if no SSL configuration is provided
+     */
+    private SSLContext createSslContextFromConfig() {
+        try {
+            String trustStorePath = getConfigProperty(SSL_TRUSTSTORE_PATH_KEY, null);
+            String trustStorePassword = getConfigProperty(SSL_TRUSTSTORE_PASSWORD_KEY, null);
+            String trustStoreType = getConfigProperty(SSL_TRUSTSTORE_TYPE_KEY, "JKS");
+
+            String keyStorePath = getConfigProperty(SSL_KEYSTORE_PATH_KEY, null);
+            String keyStorePassword = getConfigProperty(SSL_KEYSTORE_PASSWORD_KEY, null);
+            String keyStoreType = getConfigProperty(SSL_KEYSTORE_TYPE_KEY, "JKS");
+
+            // If no SSL configuration is provided, return null
+            if (trustStorePath == null && keyStorePath == null) {
+                return null;
+            }
+
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+
+            // Configure trust managers (for server certificate validation)
+            TrustManagerFactory trustManagerFactory = null;
+            if (trustStorePath != null) {
+                KeyStore trustStore = KeyStore.getInstance(trustStoreType);
+                try (InputStream trustStoreStream = new FileInputStream(trustStorePath)) {
+                    trustStore.load(trustStoreStream,
+                            trustStorePassword != null ? trustStorePassword.toCharArray() : null);
+                }
+                trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+                trustManagerFactory.init(trustStore);
+            }
+
+            // Configure key managers (for client certificate authentication)
+            KeyManagerFactory keyManagerFactory = null;
+            if (keyStorePath != null) {
+                KeyStore keyStore = KeyStore.getInstance(keyStoreType);
+                try (InputStream keyStoreStream = new FileInputStream(keyStorePath)) {
+                    keyStore.load(keyStoreStream,
+                            keyStorePassword != null ? keyStorePassword.toCharArray() : null);
+                }
+                keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+                keyManagerFactory.init(keyStore,
+                        keyStorePassword != null ? keyStorePassword.toCharArray() : null);
+            }
+
+            // Initialize SSL context
+            sslContext.init(
+                    keyManagerFactory != null ? keyManagerFactory.getKeyManagers() : null,
+                    trustManagerFactory != null ? trustManagerFactory.getTrustManagers() : null,
+                    new SecureRandom());
+
+            return sslContext;
+
+        } catch (Exception e) {
+            LRALogger.logger.warn("Failed to create SSL context from configuration", e);
+            return null;
+        }
     }
 
     private ConfigWithType loadBalancer(String loadBalancer, Map<String, String> loadBalancerParams) {
@@ -238,8 +441,7 @@ public class NarayanaLRAClient implements Closeable {
 
             // if there is only one coordinator, we don't need to initialize stork
             if (this.coordinatorCount == 1) {
-                coordinatorRestClient = RestClientBuilder.newBuilder().baseUri(this.coordinatorUrl)
-                        .build(LRACoordinatorService.class);
+                initializeCoordinatorRestClient(this.coordinatorUrl);
                 return;
             }
 
@@ -278,8 +480,7 @@ public class NarayanaLRAClient implements Closeable {
                 LRALogger.i18nLogger.warn_noLoadBalancer(coordinators, error);
             }
         }
-        coordinatorRestClient = RestClientBuilder.newBuilder().baseUri(this.coordinatorUrl)
-                .build(LRACoordinatorService.class);
+        initializeCoordinatorRestClient(this.coordinatorUrl);
 
     }
 
@@ -309,6 +510,7 @@ public class NarayanaLRAClient implements Closeable {
             return coordinatorRestClient.getAllLRAs(null, MediaType.APPLICATION_JSON, LRAConstants.CURRENT_API_VERSION_STRING)
                     .readEntity(new GenericType<List<LRAData>>() {
                     });
+
         } catch (Exception e) {
             throw new WebApplicationException(Response.status(SERVICE_UNAVAILABLE)
                     .entity("getAllLRAs client request failed: " + e.getMessage()).build());
@@ -410,8 +612,7 @@ public class NarayanaLRAClient implements Closeable {
                         .port(instance.getPort()).build();
 
                 // Update the REST client to point to the selected instance
-                coordinatorRestClient = RestClientBuilder.newBuilder().baseUri(coordinatorInstance)
-                        .build(LRACoordinatorService.class);
+                initializeCoordinatorRestClient(coordinatorInstance);
             } else {
                 coordinatorInstance = coordinatorUrl;
             }
@@ -995,6 +1196,7 @@ public class NarayanaLRAClient implements Closeable {
      * Shutdown any started resources (remark this method must be called if a config change is to take effect)
      */
     public void close() {
+        clearCurrent(true);
         if (storkInitialised) {
             Stork.shutdown();
         }

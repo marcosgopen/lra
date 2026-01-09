@@ -14,7 +14,6 @@ import static io.narayana.lra.LRAConstants.FORGET;
 import static io.narayana.lra.LRAConstants.LEAVE;
 import static io.narayana.lra.LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME;
 import static io.narayana.lra.LRAConstants.NARAYANA_LRA_PARTICIPANT_DATA_HEADER_NAME;
-import static io.narayana.lra.LRAConstants.NARAYANA_LRA_PARTICIPANT_LINK_HEADER_NAME;
 import static io.narayana.lra.LRAConstants.PARENT_LRA_PARAM_NAME;
 import static io.narayana.lra.LRAConstants.RECOVERY_COORDINATOR_PATH_NAME;
 import static io.narayana.lra.LRAConstants.STATUS;
@@ -88,6 +87,7 @@ import org.eclipse.microprofile.lra.annotation.Forget;
 import org.eclipse.microprofile.lra.annotation.LRAStatus;
 import org.eclipse.microprofile.lra.annotation.Status;
 import org.eclipse.microprofile.lra.annotation.ws.rs.Leave;
+import org.eclipse.microprofile.rest.client.RestClientBuilder;
 
 /**
  * WARNING: NarayanaLRAClient is an internal utility class and is subject to change
@@ -316,15 +316,16 @@ public class NarayanaLRAClient implements Closeable {
     }
 
     public List<LRAData> getAllLRAs() {
-        Client client = null;
         try {
-            client = getClient();
-            Response response = client.target(coordinatorUrl)
-                    .request()
-                    .header(NARAYANA_LRA_API_VERSION_HEADER_NAME, LRAConstants.CURRENT_API_VERSION_STRING)
-                    .async()
-                    .get()
-                    .get(QUERY_TIMEOUT, TimeUnit.SECONDS);
+            // Build the CoordinatorClient using the base coordinator URL
+            CoordinatorClient client = RestClientBuilder.newBuilder()
+                    .baseUri(coordinatorUrl)
+                    .build(CoordinatorClient.class);
+
+            Response response = client.getAllLRAs(
+                    "", // status filter (empty for all)
+                    MediaType.TEXT_PLAIN,
+                    LRAConstants.CURRENT_API_VERSION_STRING);
 
             if (response.getStatus() != OK.getStatusCode()) {
                 LRALogger.logger.debugf("Error getting all LRAs from the coordinator, response status: %d",
@@ -334,13 +335,11 @@ public class NarayanaLRAClient implements Closeable {
 
             return response.readEntity(new GenericType<List<LRAData>>() {
             });
-        } catch (InterruptedException | ExecutionException | TimeoutException e) {
+        } catch (WebApplicationException e) {
+            throw e;
+        } catch (Exception e) {
             throw new WebApplicationException(Response.status(SERVICE_UNAVAILABLE)
-                    .entity("getAllLRAs client request timed out, try again later").build());
-        } finally {
-            if (client != null) {
-                client.close();
-            }
+                    .entity("getAllLRAs client request failed: " + e.getMessage()).build());
         }
     }
 
@@ -725,8 +724,6 @@ public class NarayanaLRAClient implements Closeable {
     }
 
     public LRAStatus getStatus(URI uri) throws WebApplicationException {
-        Client client = null;
-        Response response;
         URL lraId;
 
         try {
@@ -740,13 +737,20 @@ public class NarayanaLRAClient implements Closeable {
         }
 
         try {
-            client = getClient();
-            response = client.target(String.format(STATUS_PATH, lraId))
-                    .request()
-                    .header(NARAYANA_LRA_API_VERSION_HEADER_NAME, LRAConstants.CURRENT_API_VERSION_STRING)
-                    .async()
-                    .get()
-                    .get(QUERY_TIMEOUT, TimeUnit.SECONDS);
+            URI uriWithoutQuery = UriBuilder.fromUri(uri).replaceQuery(null).build();
+
+            // Build the CoordinatorClient using the base coordinator URL
+            CoordinatorClient client = RestClientBuilder.newBuilder()
+                    .baseUri(LRAConstants.getLRACoordinatorUrl(uriWithoutQuery))
+                    .build(CoordinatorClient.class);
+
+            // Extract the LRA UID
+            String lraUid = LRAConstants.getLRAUid(uri);
+
+            Response response = client.getLRAStatus(
+                    lraUid,
+                    MediaType.TEXT_PLAIN,
+                    LRAConstants.CURRENT_API_VERSION_STRING);
 
             // TODO add tests for each of these checks
             if (response.getStatus() == NOT_FOUND.getStatusCode()) {
@@ -780,13 +784,11 @@ public class NarayanaLRAClient implements Closeable {
                 LRALogger.logger.error(logMsg);
                 throw new WebApplicationException(Response.status(INTERNAL_SERVER_ERROR).entity(logMsg).build());
             }
-        } catch (InterruptedException | ExecutionException | TimeoutException e) {
+        } catch (WebApplicationException e) {
+            throw e;
+        } catch (Exception e) {
             throw new WebApplicationException(Response.status(SERVICE_UNAVAILABLE)
-                    .entity("get LRA status client request timed out, try again later").build()); // TODO use an i18n logger
-        } finally {
-            if (client != null) {
-                client.close();
-            }
+                    .entity("get LRA status client request failed: " + e.getMessage()).build());
         }
     }
 
@@ -923,40 +925,55 @@ public class NarayanaLRAClient implements Closeable {
     }
 
     private void endLRA(URI lra, boolean confirm, String compensator, String userData) throws WebApplicationException {
-        Response response;
-
         lraTracef(lra, "%s LRA", confirm ? "close" : "compensate");
 
-        try (Client client = getClient()) {
-            try {
-                URI uri = UriBuilder.fromUri(lra).replaceQuery(null).build();
-                response = client.target(confirm ? String.format(CLOSE_PATH, uri) : String.format(CANCEL_PATH, uri))
-                        .request()
-                        .header(NARAYANA_LRA_API_VERSION_HEADER_NAME, LRAConstants.CURRENT_API_VERSION_STRING)
-                        .header(NARAYANA_LRA_PARTICIPANT_LINK_HEADER_NAME, compensator)
-                        .header(NARAYANA_LRA_PARTICIPANT_DATA_HEADER_NAME, userData)
-                        .async()
-                        .put(Entity.text(""))
-                        .get(END_TIMEOUT, TimeUnit.SECONDS);
-            } catch (InterruptedException | ExecutionException | TimeoutException e) {
-                throw new WebApplicationException(Response.status(SERVICE_UNAVAILABLE)
-                        .entity("end LRA client request timed out, try again later")
-                        .build());
+        try {
+            URI uri = UriBuilder.fromUri(lra).replaceQuery(null).build();
+
+            // Build the CoordinatorClient using the base coordinator URL
+            CoordinatorClient client = RestClientBuilder.newBuilder()
+                    .baseUri(LRAConstants.getLRACoordinatorUrl(uri))
+                    .build(CoordinatorClient.class);
+
+            // Remove query parameters from LRA ID and extract the UID
+            String lraId = LRAConstants.getLRAUid(lra);
+
+            // Call the appropriate endpoint (close or cancel)
+            Response response;
+            if (confirm) {
+                response = client.closeLRA(
+                        lraId,
+                        MediaType.TEXT_PLAIN,
+                        LRAConstants.CURRENT_API_VERSION_STRING,
+                        compensator == null ? "" : compensator,
+                        userData == null ? "" : userData);
+            } else {
+                response = client.cancelLRA(
+                        lraId,
+                        MediaType.TEXT_PLAIN,
+                        LRAConstants.CURRENT_API_VERSION_STRING,
+                        compensator == null ? "" : compensator,
+                        userData == null ? "" : userData);
             }
 
             if (isUnexpectedResponseStatus(response, OK, Response.Status.ACCEPTED, NOT_FOUND)) {
                 // let the client know the reason for the failure (it's in the entity body of the response object)
+
                 throw new WebApplicationException(response);
             }
 
             if (response.getStatus() == NOT_FOUND.getStatusCode()) {
                 throw new WebApplicationException(response);
             }
-
+        } catch (WebApplicationException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new WebApplicationException(Response.status(SERVICE_UNAVAILABLE)
+                    .entity("end LRA client request failed: " + e.getMessage())
+                    .build());
         } finally {
             Current.pop(lra);
             Current.removeActiveLRACache(lra);
-
         }
     }
 

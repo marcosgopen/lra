@@ -65,6 +65,8 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -728,26 +730,11 @@ public class Coordinator extends Application {
     }
 
     private URI toURI(String lraId) {
-        URL url;
 
+        String decodedURL = URLDecoder.decode(lraId, StandardCharsets.UTF_8);
         try {
             // see if it already in the correct format
-            url = new URL(lraId);
-            url.toURI();
-        } catch (Exception e) {
-            try {
-                url = new URL(String.format("%s%s/%s", context.getBaseUri(), COORDINATOR_PATH_NAME, lraId));
-            } catch (MalformedURLException e1) {
-                String errMsg = LRALogger.i18nLogger.error_invalidStringFormatOfUrl(lraId, e1);
-                LRALogger.logger.error(errMsg);
-                throw new WebApplicationException(errMsg, Response.status(BAD_REQUEST)
-                        .entity(errMsg)
-                        .build());
-            }
-        }
-
-        try {
-            return url.toURI();
+            return new URI(decodedURL);
         } catch (URISyntaxException e) {
             String errMsg = LRALogger.i18nLogger.error_invalidStringFormatOfUrl(lraId, e);
             LRALogger.logger.warn(errMsg);

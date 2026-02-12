@@ -491,8 +491,6 @@ public class LRAService {
                     .entity(errorMsg)
                     .build());
         } else {
-            // In HA mode, LRA state is automatically replicated via Infinispan
-            // No need for explicit Raft replication
             addTransaction(lra);
 
             return lra;
@@ -515,9 +513,6 @@ public class LRAService {
         }
 
         transaction.finishLRA(compensate, compensator, userData);
-
-        // In HA mode, state transitions are automatically replicated via Infinispan
-        // when the LRA calls deactivate() to save its state
 
         if (BasicAction.Current() != null) {
             if (LRALogger.logger.isInfoEnabled()) {

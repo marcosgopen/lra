@@ -24,100 +24,116 @@ import org.junit.jupiter.api.Test;
  */
 class SimpleHATest {
 
+    private static final String BASE_URL = "http://localhost:8080/lra-coordinator";
+    private static final String PROP_HA_ENABLED = "lra.coordinator.ha.enabled";
+    private static final String PROP_NODE_ID = "lra.coordinator.node.id";
+
     private String originalHaEnabled;
+    private String originalNodeId;
 
     @BeforeEach
     void setUp() {
-        // Save original value
-        originalHaEnabled = System.getProperty("lra.coordinator.ha.enabled");
+        // Save original system properties
+        originalHaEnabled = System.getProperty(PROP_HA_ENABLED);
+        originalNodeId = System.getProperty(PROP_NODE_ID);
     }
 
     @AfterEach
     void tearDown() {
-        // Restore original value
-        if (originalHaEnabled != null) {
-            System.setProperty("lra.coordinator.ha.enabled", originalHaEnabled);
+        // Restore original system properties
+        restoreProperty(PROP_HA_ENABLED, originalHaEnabled);
+        restoreProperty(PROP_NODE_ID, originalNodeId);
+    }
+
+    // Helper methods
+
+    private void restoreProperty(String key, String originalValue) {
+        if (originalValue != null) {
+            System.setProperty(key, originalValue);
         } else {
-            System.clearProperty("lra.coordinator.ha.enabled");
+            System.clearProperty(key);
+        }
+    }
+
+    private InfinispanStore createMockHAStore() {
+        return new InfinispanStore() {
+            @Override
+            public boolean isHaEnabled() {
+                return true;
+            }
+        };
+    }
+
+    private LRAService createHAService(String nodeId) {
+        System.setProperty(PROP_HA_ENABLED, "true");
+        System.setProperty(PROP_NODE_ID, nodeId);
+
+        LRAService service = new LRAService();
+        service.initializeHA(createMockHAStore(), null, null);
+        return service;
+    }
+
+    private void assertLRAIdSegments(String lraPath, int expectedSegments, String expectedBase, String expectedNodeId) {
+        String[] segments = lraPath.split("/");
+        assertEquals(expectedSegments, segments.length,
+                String.format("Expected %d segments in path: %s", expectedSegments, lraPath));
+        assertEquals(expectedBase, segments[1], "Base path should be lra-coordinator");
+        if (expectedNodeId != null) {
+            assertEquals(expectedNodeId, segments[2], "Node ID segment mismatch");
         }
     }
 
     @Test
     void testNodeIdEmbeddingInSingleInstanceMode() throws Exception {
         // Given: HA disabled
-        System.clearProperty("lra.coordinator.ha.enabled");
-
+        System.clearProperty(PROP_HA_ENABLED);
         LRAService service = new LRAService();
-        String baseUrl = "http://localhost:8080/lra-coordinator";
 
         // When: Create LRA
-        LongRunningAction lra = new LongRunningAction(service, baseUrl, null, "test-client");
+        LongRunningAction lra = new LongRunningAction(service, BASE_URL, null, "test-client");
 
         // Then: LRA ID does NOT contain node ID
         String lraIdPath = lra.getId().getPath();
         assertFalse(lraIdPath.contains("/node-"), "Single-instance mode should not embed node ID");
-
-        // Should be: /lra-coordinator/{uid}
-        String[] segments = lraIdPath.split("/");
-        assertEquals(3, segments.length, "Expected 3 segments: '', 'lra-coordinator', '{uid}'");
-        assertEquals("lra-coordinator", segments[1]);
+        assertLRAIdSegments(lraIdPath, 3, "lra-coordinator", null);
     }
 
     @Test
     void testNodeIdEmbeddingInHAMode() throws Exception {
         // Given: HA enabled with specific node ID
-        System.setProperty("lra.coordinator.ha.enabled", "true");
-        System.setProperty("lra.coordinator.node.id", "test-node-1");
-
-        LRAService service = new LRAService();
-        service.initializeHA(null, null, null);
-
-        String baseUrl = "http://localhost:8080/lra-coordinator";
+        LRAService service = createHAService("test-node-1");
 
         // When: Create LRA
-        LongRunningAction lra = new LongRunningAction(service, baseUrl, null, "test-client");
+        LongRunningAction lra = new LongRunningAction(service, BASE_URL, null, "test-client");
 
         // Then: LRA ID contains node ID
         String lraIdPath = lra.getId().getPath();
-        assertTrue(lraIdPath.contains("/test-node-1/"),
-                "HA mode should embed node ID in LRA ID");
-
-        // Should be: /lra-coordinator/test-node-1/{uid}
-        String[] segments = lraIdPath.split("/");
-        assertEquals(4, segments.length,
-                "Expected 4 segments: '', 'lra-coordinator', 'test-node-1', '{uid}'");
-        assertEquals("lra-coordinator", segments[1]);
-        assertEquals("test-node-1", segments[2]);
+        assertTrue(lraIdPath.contains("/test-node-1/"), "HA mode should embed node ID in LRA ID");
+        assertLRAIdSegments(lraIdPath, 4, "lra-coordinator", "test-node-1");
     }
 
     @Test
     void testGetNodeIdFromSystemProperty() {
         // Given: Node ID set via system property
-        System.setProperty("lra.coordinator.node.id", "my-coordinator-1");
+        System.setProperty(PROP_NODE_ID, "my-coordinator-1");
 
         LRAService service = new LRAService();
         service.initializeHA(null, null, null);
 
-        // When: Get node ID
-        String nodeId = service.getNodeId();
-
-        // Then: Should return the configured value
-        assertEquals("my-coordinator-1", nodeId);
+        // When/Then: Should return the configured value
+        assertEquals("my-coordinator-1", service.getNodeId());
     }
 
     @Test
     void testGetNodeIdFromEnvironmentFallback() {
-        // Given: No system property, but HOSTNAME env var exists
-        System.clearProperty("lra.coordinator.node.id");
-        // Note: Can't easily set env vars in Java, so this test just verifies the method works
+        // Given: No system property (relies on HOSTNAME env var or fallback)
+        System.clearProperty(PROP_NODE_ID);
 
         LRAService service = new LRAService();
         service.initializeHA(null, null, null);
 
-        // When: Get node ID
+        // When/Then: Should return some value (either HOSTNAME or fallback)
         String nodeId = service.getNodeId();
-
-        // Then: Should return some value (either HOSTNAME or fallback)
         assertNotNull(nodeId);
         assertFalse(nodeId.isEmpty());
     }
@@ -125,55 +141,29 @@ class SimpleHATest {
     @Test
     void testIsHaEnabledWhenDisabled() {
         // Given: HA disabled
-        System.clearProperty("lra.coordinator.ha.enabled");
+        System.clearProperty(PROP_HA_ENABLED);
 
-        LRAService service = new LRAService();
-
-        // When: Check if HA enabled
-        boolean haEnabled = service.isHaEnabled();
-
-        // Then: Should be false
-        assertFalse(haEnabled);
+        // When/Then: Should be false
+        assertFalse(new LRAService().isHaEnabled());
     }
 
     @Test
     void testIsHaEnabledWhenEnabled() {
         // Given: HA enabled
-        System.setProperty("lra.coordinator.ha.enabled", "true");
+        LRAService service = createHAService("test-node");
 
-        LRAService service = new LRAService();
-
-        // Mock InfinispanStore that reports HA enabled
-        InfinispanStore mockStore = new InfinispanStore() {
-            @Override
-            public boolean isHaEnabled() {
-                return true;
-            }
-        };
-
-        service.initializeHA(mockStore, null, null);
-
-        // When: Check if HA enabled
-        boolean haEnabled = service.isHaEnabled();
-
-        // Then: Should be true
-        assertTrue(haEnabled);
+        // When/Then: Should be true
+        assertTrue(service.isHaEnabled());
     }
 
     @Test
     void testNestedLRAWithNodeId() throws Exception {
         // Given: HA enabled
-        System.setProperty("lra.coordinator.ha.enabled", "true");
-        System.setProperty("lra.coordinator.node.id", "test-node-2");
-
-        LRAService service = new LRAService();
-        service.initializeHA(null, null, null);
-
-        String baseUrl = "http://localhost:8080/lra-coordinator";
+        LRAService service = createHAService("test-node-2");
 
         // When: Create parent and nested LRA
-        LongRunningAction parent = new LongRunningAction(service, baseUrl, null, "parent-client");
-        LongRunningAction child = new LongRunningAction(service, baseUrl, parent, "child-client");
+        LongRunningAction parent = new LongRunningAction(service, BASE_URL, null, "parent-client");
+        LongRunningAction child = new LongRunningAction(service, BASE_URL, parent, "child-client");
 
         // Then: Both should have node ID
         assertTrue(parent.getId().getPath().contains("/test-node-2/"),
@@ -188,23 +178,12 @@ class SimpleHATest {
     @Test
     void testMultipleNodesWithDifferentIds() throws Exception {
         // Given: Two coordinators with different node IDs
-        System.setProperty("lra.coordinator.ha.enabled", "true");
-
-        // Node 1
-        System.setProperty("lra.coordinator.node.id", "coordinator-1");
-        LRAService service1 = new LRAService();
-        service1.initializeHA(null, null, null);
-
-        // Node 2
-        System.setProperty("lra.coordinator.node.id", "coordinator-2");
-        LRAService service2 = new LRAService();
-        service2.initializeHA(null, null, null);
-
-        String baseUrl = "http://localhost:8080/lra-coordinator";
+        LRAService service1 = createHAService("coordinator-1");
+        LRAService service2 = createHAService("coordinator-2");
 
         // When: Each creates an LRA
-        LongRunningAction lra1 = new LongRunningAction(service1, baseUrl, null, "client-1");
-        LongRunningAction lra2 = new LongRunningAction(service2, baseUrl, null, "client-2");
+        LongRunningAction lra1 = new LongRunningAction(service1, BASE_URL, null, "client-1");
+        LongRunningAction lra2 = new LongRunningAction(service2, BASE_URL, null, "client-2");
 
         // Then: LRAs have different node IDs
         assertTrue(lra1.getId().getPath().contains("/coordinator-1/"),
@@ -219,12 +198,7 @@ class SimpleHATest {
     @Test
     void testLRAIdFormatConsistency() throws Exception {
         // Given: HA mode with node ID
-        System.setProperty("lra.coordinator.ha.enabled", "true");
-        System.setProperty("lra.coordinator.node.id", "node-123");
-
-        LRAService service = new LRAService();
-        service.initializeHA(null, null, null);
-
+        LRAService service = createHAService("node-123");
         String baseUrl = "http://example.com:8080/lra-coordinator";
 
         // When: Create LRA
@@ -240,23 +214,19 @@ class SimpleHATest {
         assertTrue(path.startsWith("/lra-coordinator/node-123/"),
                 "Path should start with /lra-coordinator/node-123/");
 
-        // Extract UID part
+        // Verify UID segment is not empty
         String[] segments = path.split("/");
         assertEquals(4, segments.length);
-        String uid = segments[3];
-        assertFalse(uid.isEmpty(), "UID should not be empty");
+        assertFalse(segments[3].isEmpty(), "UID should not be empty");
     }
 
     @Test
     void testClusterCoordinatorInitialization() {
-        // Given: ClusterCoordinator
+        // Given/When: ClusterCoordinator without cache manager
         ClusterCoordinator coordinator = new ClusterCoordinator();
 
-        // When: Check if initialized
-        boolean initialized = coordinator.isInitialized();
-
-        // Then: Should not be initialized yet (no cache manager)
-        assertFalse(initialized);
+        // Then: Should not be initialized yet
+        assertFalse(coordinator.isInitialized());
     }
 
     @Test
@@ -264,9 +234,8 @@ class SimpleHATest {
         // Given: ClusterCoordinator
         ClusterCoordinator coordinator = new ClusterCoordinator();
 
-        // When: Add listener
-        final boolean[] becameCoordinator = { false };
-        final boolean[] lostCoordinator = { false };
+        boolean[] becameCoordinator = { false };
+        boolean[] lostCoordinator = { false };
 
         ClusterCoordinator.CoordinatorChangeListener listener = new ClusterCoordinator.CoordinatorChangeListener() {
             @Override
@@ -280,13 +249,11 @@ class SimpleHATest {
             }
         };
 
+        // When: Add and remove listener
         coordinator.addCoordinatorChangeListener(listener);
-
-        // Then: Listener registered
-        // (We can't easily trigger events in unit test without JGroups cluster,
-        // but we verify the API works)
-
-        // Cleanup
         coordinator.removeCoordinatorChangeListener(listener);
+
+        // Then: No exceptions thrown (listener API works correctly)
+        // Note: Can't trigger events without actual JGroups cluster
     }
 }

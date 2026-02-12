@@ -276,20 +276,20 @@ public class InfinispanStore {
     private Cache<URI, LRAState> getCacheForState(LRAState state) {
         switch (state.getStatus()) {
             case Active:
-                return activeLRACache;
+                return getActiveLRACache();
             case Closing:
             case Cancelling:
-                return recoveringLRACache;
+                return getRecoveringLRACache();
             case FailedToClose:
             case FailedToCancel:
-                return failedLRACache;
+                return getFailedLRACache();
             case Closed:
             case Cancelled:
                 // Finished LRAs can be in recovering cache if they have pending actions
                 // Otherwise they should be removed
-                return recoveringLRACache;
+                return getRecoveringLRACache();
             default:
-                return activeLRACache;
+                return getActiveLRACache();
         }
     }
 

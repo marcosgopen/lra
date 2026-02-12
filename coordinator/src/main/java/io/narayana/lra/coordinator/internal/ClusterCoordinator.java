@@ -6,21 +6,23 @@
 package io.narayana.lra.coordinator.internal;
 
 import io.narayana.lra.logging.LRALogger;
-import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import org.infinispan.manager.EmbeddedCacheManager;
+import org.infinispan.notifications.Listener;
+import org.infinispan.notifications.cachemanagerlistener.annotation.ViewChanged;
+import org.infinispan.notifications.cachemanagerlistener.event.ViewChangedEvent;
 import org.infinispan.remoting.transport.Address;
-import org.jgroups.JChannel;
-import org.jgroups.View;
-import org.jgroups.ViewListener;
 
 /**
  * Manages cluster coordination and leader election for LRA coordinators.
  *
- * Uses JGroups coordinator election (first member in view becomes coordinator).
+ * Uses Infinispan's built-in coordinator election (based on JGroups view).
  * This is simpler than Raft and sufficient for LRA recovery coordination.
  *
  * In HA mode, only the cluster coordinator performs recovery operations.
@@ -28,17 +30,18 @@ import org.jgroups.ViewListener;
  * simultaneously.
  */
 @ApplicationScoped
-public class ClusterCoordinator implements ViewListener {
+@Listener
+public class ClusterCoordinator {
 
     private EmbeddedCacheManager cacheManager;
-    private JChannel channel;
     private boolean initialized = false;
     private volatile boolean isCoordinator = false;
     private final List<CoordinatorChangeListener> listeners = new CopyOnWriteArrayList<>();
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
 
     /**
      * Initializes cluster coordination using the Infinispan cache manager.
-     * The cache manager already has JGroups configured.
+     * Uses Infinispan's built-in cluster view and coordinator election.
      *
      * @param cacheManager the Infinispan cache manager
      */
@@ -50,22 +53,14 @@ public class ClusterCoordinator implements ViewListener {
         try {
             this.cacheManager = cacheManager;
 
-            // Get JChannel from Infinispan's transport
-            org.infinispan.remoting.transport.Transport transport = cacheManager.getTransport();
-
-            if (transport == null) {
-                LRALogger.logger.warn("Infinispan transport not available, running in local mode");
-                return;
-            }
-
-            // Get JGroups channel from Infinispan transport
-            this.channel = (JChannel) transport.getChannel();
-
-            // Add view listener to detect coordinator changes
-            channel.addViewListener(this);
+            // Register as listener for view change events
+            cacheManager.addListener(this);
 
             // Check initial coordinator status
-            updateCoordinatorStatus(channel.getView());
+            checkCoordinatorStatus();
+
+            // Schedule periodic coordinator check as fallback (in case we miss events)
+            scheduler.scheduleWithFixedDelay(this::checkCoordinatorStatus, 10, 10, TimeUnit.SECONDS);
 
             initialized = true;
             LRALogger.logger.infof("ClusterCoordinator initialized (isCoordinator=%s)", isCoordinator);
@@ -76,84 +71,55 @@ public class ClusterCoordinator implements ViewListener {
     }
 
     /**
-     * Alternative initialization for environments where we need to create
-     * a standalone JGroups channel.
+     * Infinispan ViewChanged listener - called when cluster membership changes.
+     *
+     * @param event the view changed event
      */
-    @PostConstruct
-    public void initializeStandalone() {
-        try {
-            // Check if HA mode is enabled
-            String haEnabled = System.getProperty("lra.coordinator.ha.enabled", "false");
-            if (!"true".equalsIgnoreCase(haEnabled)) {
-                LRALogger.logger.debug("LRA HA mode disabled, ClusterCoordinator will not be initialized");
-                return;
-            }
-
-            // If we already have a cache manager (from CDI), we're done
-            if (cacheManager != null) {
-                return;
-            }
-
-            LRALogger.logger.info("Initializing standalone ClusterCoordinator");
-
-            // Get cluster configuration
-            String clusterName = System.getProperty("lra.coordinator.cluster.name",
-                    System.getenv().getOrDefault("LRA_CLUSTER_NAME", "lra-cluster"));
-            String nodeName = getNodeName();
-
-            // Create JGroups channel with default JGroups config
-            String configFile = System.getProperty("lra.coordinator.jgroups.config",
-                    "default-jgroups-udp.xml");
-
-            channel = new JChannel(configFile);
-            channel.setName(nodeName);
-            channel.addViewListener(this);
-            channel.connect(clusterName);
-
-            // Check initial coordinator status
-            updateCoordinatorStatus(channel.getView());
-
-            initialized = true;
-            LRALogger.logger.infof("Standalone ClusterCoordinator initialized for cluster '%s' (isCoordinator=%s)",
-                    clusterName, isCoordinator);
-
-        } catch (Exception e) {
-            LRALogger.logger.warnf(e, "Failed to initialize standalone ClusterCoordinator, running in single-instance mode");
+    @ViewChanged
+    public void viewChanged(ViewChangedEvent event) {
+        if (LRALogger.logger.isDebugEnabled()) {
+            LRALogger.logger.debugf("Cluster view changed: new view size=%d", event.getNewMembers().size());
         }
+        checkCoordinatorStatus();
     }
 
     /**
-     * JGroups ViewListener callback - called when cluster membership changes.
+     * Checks and updates coordinator status based on Infinispan's cluster view.
+     * The coordinator is determined by Infinispan (first member in JGroups view).
      */
-    @Override
-    public void viewAccepted(View view) {
-        LRALogger.logger.infof("New cluster view: %s", view);
-        updateCoordinatorStatus(view);
-    }
-
-    /**
-     * Updates coordinator status based on the JGroups view.
-     * The first member in the view is the coordinator.
-     */
-    private void updateCoordinatorStatus(View view) {
-        if (view == null || channel == null) {
+    private void checkCoordinatorStatus() {
+        if (cacheManager == null) {
             return;
         }
 
-        boolean wasCoordinator = isCoordinator;
-        Address localAddress = channel.getAddress();
-        Address coordinator = view.getCoord();
+        try {
+            Address localAddress = cacheManager.getAddress();
+            Address coordinatorAddress = cacheManager.getCoordinator();
 
-        isCoordinator = localAddress.equals(coordinator);
+            if (localAddress == null || coordinatorAddress == null) {
+                // Single-node or local mode
+                isCoordinator = true;
+                return;
+            }
 
-        LRALogger.logger.infof("Coordinator status: %s (local=%s, coordinator=%s)",
-                isCoordinator ? "COORDINATOR" : "FOLLOWER", localAddress, coordinator);
+            boolean wasCoordinator = isCoordinator;
+            isCoordinator = localAddress.equals(coordinatorAddress);
 
-        // Notify listeners of coordinator change
-        if (isCoordinator && !wasCoordinator) {
-            notifyBecameCoordinator();
-        } else if (!isCoordinator && wasCoordinator) {
-            notifyLostCoordinator();
+            if (LRALogger.logger.isDebugEnabled()) {
+                LRALogger.logger.debugf("Coordinator status: %s (local=%s, coordinator=%s)",
+                        isCoordinator ? "COORDINATOR" : "FOLLOWER", localAddress, coordinatorAddress);
+            }
+
+            // Notify listeners of coordinator change
+            if (isCoordinator && !wasCoordinator) {
+                LRALogger.logger.info("This node became the cluster coordinator");
+                notifyBecameCoordinator();
+            } else if (!isCoordinator && wasCoordinator) {
+                LRALogger.logger.info("This node lost cluster coordinator status");
+                notifyLostCoordinator();
+            }
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Error checking coordinator status");
         }
     }
 
@@ -220,29 +186,18 @@ public class ClusterCoordinator implements ViewListener {
     }
 
     /**
-     * Gets the node name for this coordinator instance.
-     *
-     * @return the node name
-     */
-    private String getNodeName() {
-        String nodeName = System.getProperty("lra.coordinator.node.id");
-        if (nodeName == null || nodeName.isEmpty()) {
-            nodeName = System.getenv("HOSTNAME");
-        }
-        if (nodeName == null || nodeName.isEmpty()) {
-            nodeName = "lra-coordinator-" + System.currentTimeMillis();
-        }
-        return nodeName;
-    }
-
-    /**
      * Shuts down cluster coordination.
      */
     @PreDestroy
     public void shutdown() {
-        if (channel != null && channel.isConnected()) {
-            LRALogger.logger.info("Shutting down ClusterCoordinator");
-            channel.close();
+        scheduler.shutdown();
+        if (cacheManager != null) {
+            try {
+                cacheManager.removeListener(this);
+                LRALogger.logger.info("Shutting down ClusterCoordinator");
+            } catch (Exception e) {
+                LRALogger.logger.warnf(e, "Error during ClusterCoordinator shutdown");
+            }
         }
     }
 

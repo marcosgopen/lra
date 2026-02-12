@@ -10,6 +10,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import java.net.URI;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import org.infinispan.lock.EmbeddedClusteredLockManagerFactory;
 import org.infinispan.lock.api.ClusteredLock;
 import org.infinispan.lock.api.ClusteredLockManager;
 import org.infinispan.manager.EmbeddedCacheManager;
@@ -41,7 +42,8 @@ public class DistributedLockManager {
         }
 
         try {
-            this.lockManager = cacheManager.getClusteredLockManager();
+            // In Infinispan 16.x, use factory method to get ClusteredLockManager
+            this.lockManager = EmbeddedClusteredLockManagerFactory.from(cacheManager);
             this.initialized = true;
             LRALogger.logger.info("DistributedLockManager initialized");
         } catch (Exception e) {

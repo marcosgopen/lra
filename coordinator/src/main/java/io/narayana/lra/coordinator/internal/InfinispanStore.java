@@ -52,7 +52,8 @@ public class InfinispanStore {
         this.haEnabled = "true".equalsIgnoreCase(haEnabledProp);
 
         if (haEnabled) {
-            if (activeLRACache == null || recoveringLRACache == null || failedLRACache == null) {
+            // Use getters instead of fields for testability
+            if (getActiveLRACache() == null || getRecoveringLRACache() == null || getFailedLRACache() == null) {
                 LRALogger.logger.warn("HA mode enabled but Infinispan caches not available, disabling HA");
                 this.haEnabled = false;
             } else {
@@ -101,19 +102,19 @@ public class InfinispanStore {
 
         try {
             // Try active cache first
-            LRAState state = activeLRACache.get(lraId);
+            LRAState state = getActiveLRACache().get(lraId);
             if (state != null) {
                 return state;
             }
 
             // Try recovering cache
-            state = recoveringLRACache.get(lraId);
+            state = getRecoveringLRACache().get(lraId);
             if (state != null) {
                 return state;
             }
 
             // Try failed cache
-            state = failedLRACache.get(lraId);
+            state = getFailedLRACache().get(lraId);
             return state;
 
         } catch (Exception e) {
@@ -133,9 +134,9 @@ public class InfinispanStore {
         }
 
         try {
-            activeLRACache.remove(lraId);
-            recoveringLRACache.remove(lraId);
-            failedLRACache.remove(lraId);
+            getActiveLRACache().remove(lraId);
+            getRecoveringLRACache().remove(lraId);
+            getFailedLRACache().remove(lraId);
 
             if (LRALogger.logger.isTraceEnabled()) {
                 LRALogger.logger.tracef("Removed LRA %s from Infinispan", lraId);
@@ -159,10 +160,10 @@ public class InfinispanStore {
 
         try {
             // Remove from active cache
-            activeLRACache.remove(lraId);
+            getActiveLRACache().remove(lraId);
 
             // Add to recovering cache
-            recoveringLRACache.put(lraId, state);
+            getRecoveringLRACache().put(lraId, state);
 
             if (LRALogger.logger.isTraceEnabled()) {
                 LRALogger.logger.tracef("Moved LRA %s to recovering cache", lraId);
@@ -192,11 +193,11 @@ public class InfinispanStore {
             }
 
             // Remove from active and recovering caches
-            activeLRACache.remove(lraId);
-            recoveringLRACache.remove(lraId);
+            getActiveLRACache().remove(lraId);
+            getRecoveringLRACache().remove(lraId);
 
             // Add to failed cache
-            failedLRACache.put(lraId, state);
+            getFailedLRACache().put(lraId, state);
 
             if (LRALogger.logger.isTraceEnabled()) {
                 LRALogger.logger.tracef("Moved LRA %s to failed cache", lraId);
@@ -226,12 +227,12 @@ public class InfinispanStore {
      * @return true if cache is available for operations
      */
     public boolean isAvailable() {
-        if (!haEnabled || activeLRACache == null) {
+        if (!haEnabled || getActiveLRACache() == null) {
             return true; // Single-instance mode or not initialized
         }
 
         try {
-            AvailabilityMode mode = activeLRACache.getAdvancedCache().getAvailability();
+            AvailabilityMode mode = getActiveLRACache().getAdvancedCache().getAvailability();
 
             if (mode == AvailabilityMode.DEGRADED_MODE) {
                 if (LRALogger.logger.isDebugEnabled()) {
@@ -254,12 +255,12 @@ public class InfinispanStore {
      * @return the availability mode, or null if not in HA mode
      */
     public AvailabilityMode getAvailabilityMode() {
-        if (!haEnabled || activeLRACache == null) {
+        if (!haEnabled || getActiveLRACache() == null) {
             return null;
         }
 
         try {
-            return activeLRACache.getAdvancedCache().getAvailability();
+            return getActiveLRACache().getAdvancedCache().getAvailability();
         } catch (Exception e) {
             LRALogger.logger.warnf(e, "Error getting cache availability mode");
             return null;

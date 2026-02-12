@@ -5,8 +5,10 @@
 
 package io.narayana.lra.coordinator.domain.model;
 
+import com.arjuna.ats.arjuna.common.Uid;
 import com.arjuna.ats.arjuna.state.InputObjectState;
 import com.arjuna.ats.arjuna.state.OutputObjectState;
+import io.narayana.lra.LRAConstants;
 import java.io.IOException;
 import java.io.Serializable;
 import java.net.URI;
@@ -75,10 +77,20 @@ public class LRAState implements Serializable {
      * @return the InputObjectState
      */
     public InputObjectState toInputObjectState() {
-        if (serializedState == null) {
+        if (serializedState == null || id == null) {
             return null;
         }
-        return new InputObjectState(serializedState);
+
+        try {
+            // Extract UID from LRA ID and reconstruct InputObjectState
+            String uidString = LRAConstants.getLRAUid(id);
+            Uid uid = new Uid(uidString);
+            String type = LongRunningAction.getType();
+
+            return new InputObjectState(uid, type, serializedState);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     // Getters

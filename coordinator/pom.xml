@@ -19,7 +19,6 @@
 
   <properties>
     <lra.coordinator.path>lra-coordinator/lra-coordinator</lra.coordinator.path>
-    <version.org.infinispan>15.0.0.Final</version.org.infinispan>
   </properties>
 
   <dependencies>

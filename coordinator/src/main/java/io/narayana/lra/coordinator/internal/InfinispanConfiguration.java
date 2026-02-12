@@ -66,10 +66,14 @@ public class InfinispanConfiguration {
                     .transport()
                     .defaultTransport()
                     .clusterName(clusterName)
-                    .nodeName(getNodeName())
+                    .nodeName(getNodeName());
+
+            globalConfig
                     .globalState()
                     .enable()
-                    .persistentLocation(getPersistentLocation())
+                    .persistentLocation(getPersistentLocation());
+
+            globalConfig
                     .cacheContainer()
                     .statistics(true);
 

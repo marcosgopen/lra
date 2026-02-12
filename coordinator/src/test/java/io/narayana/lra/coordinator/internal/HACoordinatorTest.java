@@ -81,7 +81,9 @@ class HACoordinatorTest {
                     .transport()
                     .defaultTransport()
                     .clusterName(clusterName)
-                    .nodeName(nodeName)
+                    .nodeName(nodeName);
+
+            globalConfig
                     .cacheContainer()
                     .statistics(true);
 

@@ -746,7 +746,7 @@ public class LRAService {
         if (nodeId == null || nodeId.isEmpty()) {
             // Fallback to Narayana node identifier
             try {
-                int narayanaNodeId = com.arjuna.ats.arjuna.common.arjPropertyManager
+                String narayanaNodeId = com.arjuna.ats.arjuna.common.arjPropertyManager
                         .getCoreEnvironmentBean().getNodeIdentifier();
                 nodeId = "node-" + narayanaNodeId;
             } catch (Exception e) {

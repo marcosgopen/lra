@@ -23,9 +23,12 @@ import io.narayana.lra.coordinator.domain.service.LRAService;
 import io.narayana.lra.logging.LRALogger;
 import java.io.IOException;
 import java.net.URI;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.eclipse.microprofile.lra.annotation.LRAStatus;
 
@@ -170,6 +173,10 @@ public class LRARecoveryModule implements RecoveryModule,
             return;
         }
 
+        // Check for timed-out LRAs (HA mode only - safety net if coordinator fails before timeout)
+        checkForTimedOutLRAs();
+
+        // Recover pending transactions
         recoverTransactions();
     }
 
@@ -295,6 +302,113 @@ public class LRARecoveryModule implements RecoveryModule,
         } catch (Exception e) {
             LRALogger.logger.errorf(e, "Error during Infinispan recovery, falling back to ObjectStore");
             recoverTransactionsFromObjectStore();
+        }
+    }
+
+    /**
+     * Scans active LRAs for timeouts and initiates cancellation.
+     * This ensures that LRAs timeout even if the creating coordinator fails.
+     *
+     * This is the safety net for timeout handling in HA mode:
+     * - Normal path: Creating coordinator schedules local timeout (fast, best-effort)
+     * - Safety net: Recovery coordinator detects expired LRAs during periodic scan
+     *
+     * Only runs in HA mode, as single-instance mode relies on local schedulers.
+     */
+    private void checkForTimedOutLRAs() {
+        if (!haEnabled || infinispanStore == null) {
+            return; // Single-instance mode uses local schedulers
+        }
+
+        try {
+            // Get the active LRA cache
+            org.infinispan.Cache<URI, io.narayana.lra.coordinator.domain.model.LRAState> activeCache = infinispanStore
+                    .getActiveLRACache();
+
+            if (activeCache == null) {
+                if (LRALogger.logger.isDebugEnabled()) {
+                    LRALogger.logger.debug("Active LRA cache not available for timeout checking");
+                }
+                return;
+            }
+
+            LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+            int timeoutCount = 0;
+            int lockedCount = 0;
+
+            // Scan all active LRAs for timeouts
+            for (java.util.Map.Entry<URI, io.narayana.lra.coordinator.domain.model.LRAState> entry : activeCache.entrySet()) {
+                URI lraId = entry.getKey();
+                io.narayana.lra.coordinator.domain.model.LRAState state = entry.getValue();
+
+                // Check if LRA has a timeout and it has expired
+                if (state.getFinishTime() != null && now.isAfter(state.getFinishTime())) {
+
+                    // Acquire distributed lock to prevent multiple coordinators
+                    // from timing out the same LRA
+                    DistributedLockManager.LockHandle lockHandle = null;
+                    if (distributedLockManager != null) {
+                        lockHandle = distributedLockManager.acquireLock(lraId, 100, TimeUnit.MILLISECONDS);
+                        if (lockHandle == null) {
+                            // Another node is handling this timeout
+                            lockedCount++;
+                            if (LRALogger.logger.isTraceEnabled()) {
+                                LRALogger.logger.tracef(
+                                        "LRARecoveryModule: Skipping timeout for LRA %s (locked by another node)",
+                                        lraId);
+                            }
+                            continue;
+                        }
+                    }
+
+                    try {
+                        // Re-check timeout after acquiring lock (state may have changed)
+                        state = infinispanStore.loadLRA(lraId);
+                        if (state != null &&
+                                state.getStatus() == LRAStatus.Active &&
+                                state.getFinishTime() != null &&
+                                now.isAfter(state.getFinishTime())) {
+
+                            if (LRALogger.logger.isInfoEnabled()) {
+                                LRALogger.logger.infof(
+                                        "LRARecoveryModule: LRA %s has timed out (finishTime=%s, now=%s), initiating cancellation",
+                                        lraId, state.getFinishTime(), now);
+                            }
+
+                            // Load the LRA and trigger cancellation
+                            LongRunningAction lra = service.getTransaction(lraId);
+                            if (lra != null) {
+                                // Trigger cancellation (finishLRA handles state transition internally)
+                                lra.finishLRA(true); // true = cancel
+                                timeoutCount++;
+                            } else {
+                                LRALogger.logger.warnf(
+                                        "LRARecoveryModule: Cannot load LRA %s for timeout processing", lraId);
+                            }
+                        }
+                    } catch (Exception e) {
+                        LRALogger.logger.warnf(e,
+                                "Error timing out LRA %s", lraId);
+                    } finally {
+                        if (lockHandle != null) {
+                            try {
+                                lockHandle.release();
+                            } catch (Exception e) {
+                                LRALogger.logger.warnf(e, "Error releasing lock for LRA %s", lraId);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (timeoutCount > 0 || (LRALogger.logger.isDebugEnabled() && lockedCount > 0)) {
+                LRALogger.logger.infof(
+                        "LRARecoveryModule: Processed %d timed-out LRAs (%d skipped - locked by other nodes)",
+                        timeoutCount, lockedCount);
+            }
+
+        } catch (Exception e) {
+            LRALogger.logger.errorf(e, "Error checking for timed-out LRAs");
         }
     }
 

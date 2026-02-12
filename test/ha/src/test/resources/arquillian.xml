@@ -1,0 +1,50 @@
+<!--
+   Copyright The Narayana Authors
+   SPDX short identifier: Apache-2.0
+ -->
+
+<arquillian xmlns="http://jboss.org/schema/arquillian"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="
+        http://jboss.org/schema/arquillian
+        http://jboss.org/schema/arquillian/arquillian_1_0.xsd">
+
+    <!-- First WildFly instance (Node 1) -->
+    <container qualifier="wildfly-ha-node1" mode="manual">
+        <configuration>
+            <property name="jbossHome">${wildfly.home}</property>
+            <property name="serverConfig">standalone-ha.xml</property>
+            <property name="javaVmArguments">
+                -Djboss.node.name=node1
+                -Djboss.socket.binding.port-offset=0
+                -Dlra.coordinator.ha.enabled=true
+                -Dlra.coordinator.node.id=node1
+                -Djava.net.preferIPv4Stack=true
+                -Djgroups.bind_addr=127.0.0.1
+            </property>
+            <property name="managementAddress">127.0.0.1</property>
+            <property name="managementPort">9990</property>
+            <property name="startupTimeoutInSeconds">120</property>
+        </configuration>
+    </container>
+
+    <!-- Second WildFly instance (Node 2) -->
+    <container qualifier="wildfly-ha-node2" mode="manual">
+        <configuration>
+            <property name="jbossHome">${wildfly.home}</property>
+            <property name="serverConfig">standalone-ha.xml</property>
+            <property name="javaVmArguments">
+                -Djboss.node.name=node2
+                -Djboss.socket.binding.port-offset=100
+                -Dlra.coordinator.ha.enabled=true
+                -Dlra.coordinator.node.id=node2
+                -Djava.net.preferIPv4Stack=true
+                -Djgroups.bind_addr=127.0.0.1
+            </property>
+            <property name="managementAddress">127.0.0.1</property>
+            <property name="managementPort">10090</property>
+            <property name="startupTimeoutInSeconds">120</property>
+        </configuration>
+    </container>
+
+</arquillian>

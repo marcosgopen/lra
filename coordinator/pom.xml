@@ -19,6 +19,7 @@
 
   <properties>
     <lra.coordinator.path>lra-coordinator/lra-coordinator</lra.coordinator.path>
+    <version.org.infinispan>15.0.0.Final</version.org.infinispan>
   </properties>
 
   <dependencies>
@@ -161,6 +162,20 @@
       <artifactId>hamcrest</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- High Availability: Infinispan for distributed storage and clustering -->
+    <dependency>
+      <groupId>org.infinispan</groupId>
+      <artifactId>infinispan-core</artifactId>
+      <version>${version.org.infinispan}</version>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.infinispan</groupId>
+      <artifactId>infinispan-clustered-lock</artifactId>
+      <version>${version.org.infinispan}</version>
+      <optional>true</optional>
+    </dependency>
+    <!-- Note: JGroups is included transitively via infinispan-core for coordinator election -->
   </dependencies>
 
   <build>

@@ -19,6 +19,9 @@ import io.narayana.lra.LRAConstants;
 import io.narayana.lra.LRAData;
 import io.narayana.lra.coordinator.domain.model.LRAParticipantRecord;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
+import io.narayana.lra.coordinator.internal.ClusterCoordinator;
+import io.narayana.lra.coordinator.internal.DistributedLockManager;
+import io.narayana.lra.coordinator.internal.InfinispanStore;
 import io.narayana.lra.coordinator.internal.LRARecoveryModule;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.ws.rs.NotFoundException;
@@ -44,41 +47,113 @@ public class LRAService {
     private final Map<LongRunningAction, Map<String, String>> lraParticipants = new ConcurrentHashMap<>();
     private LRARecoveryModule recoveryModule;
 
+    // HA components (injected by LRARecoveryModule when HA is enabled)
+    private InfinispanStore infinispanStore;
+    private DistributedLockManager distributedLockManager;
+    private ClusterCoordinator clusterCoordinator;
+    private String nodeId;
+    private boolean haEnabled = false;
+
+    // Map to track distributed lock handles for cleanup
+    private final Map<URI, DistributedLockManager.LockHandle> distributedLockHandles = new ConcurrentHashMap<>();
+
+    /**
+     * Gets a transaction by LRA ID.
+     *
+     * This method is now race-condition free by using atomic operations.
+     * In HA mode, it will also attempt to load the LRA from Infinispan if not in memory.
+     *
+     * @param lraId the LRA ID
+     * @return the LongRunningAction
+     * @throws NotFoundException if the LRA cannot be found
+     */
     public LongRunningAction getTransaction(URI lraId) throws NotFoundException {
-        if (!lras.containsKey(lraId)) {
-            String uid = LRAConstants.getLRAUid(lraId);
-
-            if (uid == null || uid.isEmpty()) {
-                String errorMsg = LRALogger.i18nLogger.warn_invalid_uri(
-                        String.valueOf(lraId), "LongRunningAction.getTransaction");
-                throw new NotFoundException(errorMsg, // 404
-                        Response.status(NOT_FOUND).entity(errorMsg).build());
-            }
-
-            // try comparing on uid since different URIs can map to the same resource
-            // (eg localhost versus 127.0.0.1 versus :1 etc)
-            for (LongRunningAction lra : lras.values()) {
-                if (uid.equals(lra.get_uid().fileStringForm())) {
-                    return lra;
-                }
-            }
-
-            if (!recoveringLRAs.containsKey(lraId)) {
-                for (LongRunningAction lra : recoveringLRAs.values()) {
-                    if (uid.equals(lra.get_uid().fileStringForm())) {
-                        return lra;
-                    }
-                }
-
-                String errorMsg = "Cannot find transaction id: " + lraId;
-                throw new NotFoundException(errorMsg,
-                        Response.status(NOT_FOUND).entity(errorMsg).build());
-            }
-
-            return recoveringLRAs.get(lraId);
+        // Fast path: check active LRAs first (atomic get)
+        LongRunningAction lra = lras.get(lraId);
+        if (lra != null) {
+            return lra;
         }
 
-        return lras.get(lraId);
+        // Check recovering LRAs (atomic get)
+        lra = recoveringLRAs.get(lraId);
+        if (lra != null) {
+            return lra;
+        }
+
+        // Extract UID for alternative lookups
+        String uid = LRAConstants.getLRAUid(lraId);
+        if (uid == null || uid.isEmpty()) {
+            String errorMsg = LRALogger.i18nLogger.warn_invalid_uri(
+                    String.valueOf(lraId), "LongRunningAction.getTransaction");
+            throw new NotFoundException(errorMsg,
+                    Response.status(NOT_FOUND).entity(errorMsg).build());
+        }
+
+        // Try comparing on UID since different URIs can map to the same resource
+        // (e.g., localhost vs 127.0.0.1 vs ::1)
+        lra = findByUid(lras, uid);
+        if (lra != null) {
+            return lra;
+        }
+
+        lra = findByUid(recoveringLRAs, uid);
+        if (lra != null) {
+            return lra;
+        }
+
+        // In HA mode, try to load from Infinispan atomically
+        if (haEnabled && infinispanStore != null) {
+            // Check if cache is available (not in minority partition)
+            if (!infinispanStore.isAvailable()) {
+                String errorMsg = "Coordinator in minority partition - cannot access LRA state";
+                throw new WebApplicationException(errorMsg,
+                        Response.status(SERVICE_UNAVAILABLE).entity(errorMsg).build());
+            }
+
+            // Use computeIfAbsent to atomically check and load
+            lra = lras.computeIfAbsent(lraId, key -> {
+                try {
+                    io.narayana.lra.coordinator.domain.model.LRAState state = infinispanStore.loadLRA(key);
+                    if (state != null) {
+                        // Create a RecoveringLRA from the state
+                        LongRunningAction recoveredLra = new LongRunningAction(this,
+                                new com.arjuna.ats.arjuna.common.Uid(uid));
+
+                        if (recoveredLra.fromLRAState(state)) {
+                            LRALogger.logger.infof("Loaded LRA %s from Infinispan", key);
+                            return recoveredLra;
+                        } else {
+                            LRALogger.logger.warnf("Failed to restore LRA %s from state", key);
+                        }
+                    }
+                } catch (Exception e) {
+                    LRALogger.logger.warnf(e, "Error loading LRA %s from Infinispan", key);
+                }
+                return null;
+            });
+
+            if (lra != null) {
+                return lra;
+            }
+        }
+
+        // Not found anywhere
+        String errorMsg = "Cannot find transaction id: " + lraId;
+        throw new NotFoundException(errorMsg,
+                Response.status(NOT_FOUND).entity(errorMsg).build());
+    }
+
+    /**
+     * Helper method to find an LRA by UID in a map.
+     * This handles cases where the URI format differs but the UID is the same.
+     */
+    private LongRunningAction findByUid(Map<URI, LongRunningAction> map, String uid) {
+        for (LongRunningAction lra : map.values()) {
+            if (uid.equals(lra.get_uid().fileStringForm())) {
+                return lra;
+            }
+        }
+        return null;
     }
 
     public LongRunningAction lookupTransaction(URI lraId) {
@@ -94,28 +169,138 @@ public class LRAService {
         return lra.getLRAData();
     }
 
+    /**
+     * Acquires a lock for an LRA (blocking).
+     * In HA mode, acquires both distributed and local locks.
+     *
+     * @param lraId the LRA ID
+     * @return the lock (caller must unlock in finally block)
+     */
     public synchronized ReentrantLock lockTransaction(URI lraId) {
-        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new ReentrantLock());
+        // In HA mode, acquire distributed lock first
+        if (haEnabled && distributedLockManager != null) {
+            DistributedLockManager.LockHandle distributedLock = distributedLockManager.acquireLock(lraId);
+            if (distributedLock == null) {
+                LRALogger.logger.warnf("Failed to acquire distributed lock for LRA %s", lraId);
+                return null;
+            }
+            distributedLockHandles.put(lraId, distributedLock);
+        }
 
+        // Always acquire local lock for backward compatibility
+        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new HAReentrantLock(lraId, this));
         lock.lock();
 
         return lock;
     }
 
+    /**
+     * Tries to acquire a lock for an LRA (non-blocking).
+     * In HA mode, acquires both distributed and local locks.
+     *
+     * @param lraId the LRA ID
+     * @return the lock if acquired, null otherwise
+     */
     public synchronized ReentrantLock tryLockTransaction(URI lraId) {
-        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new ReentrantLock());
+        // In HA mode, try to acquire distributed lock first
+        if (haEnabled && distributedLockManager != null) {
+            DistributedLockManager.LockHandle distributedLock = distributedLockManager.acquireLock(lraId, 0, MILLISECONDS);
+            if (distributedLock == null) {
+                return null; // Failed to acquire distributed lock
+            }
+            distributedLockHandles.put(lraId, distributedLock);
+        }
 
-        return lock.tryLock() ? lock : null;
+        // Try to acquire local lock
+        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new HAReentrantLock(lraId, this));
+        if (lock.tryLock()) {
+            return lock;
+        } else {
+            // Failed to acquire local lock, release distributed lock
+            releaseDistributedLock(lraId);
+            return null;
+        }
     }
 
+    /**
+     * Tries to acquire a lock for an LRA with timeout.
+     * In HA mode, acquires both distributed and local locks.
+     *
+     * @param lraId the LRA ID
+     * @param timeout the timeout in milliseconds
+     * @return the lock if acquired, null otherwise
+     */
     public synchronized ReentrantLock tryTimedLockTransaction(URI lraId, long timeout) {
-        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new ReentrantLock());
+        // In HA mode, try to acquire distributed lock first with timeout
+        if (haEnabled && distributedLockManager != null) {
+            DistributedLockManager.LockHandle distributedLock = distributedLockManager.acquireLock(lraId, timeout,
+                    MILLISECONDS);
+            if (distributedLock == null) {
+                return null; // Failed to acquire distributed lock
+            }
+            distributedLockHandles.put(lraId, distributedLock);
+        }
 
+        // Try to acquire local lock with timeout
+        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new HAReentrantLock(lraId, this));
         try {
-            return lock.tryLock(timeout, MILLISECONDS) ? lock : null;
+            if (lock.tryLock(timeout, MILLISECONDS)) {
+                return lock;
+            } else {
+                // Failed to acquire local lock, release distributed lock
+                releaseDistributedLock(lraId);
+                return null;
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            releaseDistributedLock(lraId);
             return null;
+        }
+    }
+
+    /**
+     * Releases the distributed lock for an LRA (if in HA mode).
+     * Called internally when lock acquisition fails or when unlock is called.
+     *
+     * @param lraId the LRA ID
+     */
+    void releaseDistributedLock(URI lraId) {
+        if (haEnabled) {
+            DistributedLockManager.LockHandle handle = distributedLockHandles.remove(lraId);
+            if (handle != null) {
+                try {
+                    handle.release();
+                } catch (Exception e) {
+                    LRALogger.logger.warnf(e, "Error releasing distributed lock for LRA %s", lraId);
+                }
+            }
+        }
+    }
+
+    /**
+     * Custom ReentrantLock that also releases distributed locks in HA mode.
+     * This maintains backward compatibility while adding distributed locking.
+     */
+    private static class HAReentrantLock extends ReentrantLock {
+        private final URI lraId;
+        private final LRAService lraService;
+
+        HAReentrantLock(URI lraId, LRAService lraService) {
+            this.lraId = lraId;
+            this.lraService = lraService;
+        }
+
+        @Override
+        public void unlock() {
+            try {
+                super.unlock();
+            } finally {
+                // Also release distributed lock if in HA mode
+                // Only release if this is the final unlock (not held by this thread anymore)
+                if (!isHeldByCurrentThread()) {
+                    lraService.releaseDistributedLock(lraId);
+                }
+            }
         }
     }
 
@@ -158,6 +343,11 @@ public class LRAService {
     }
 
     public void addTransaction(LongRunningAction lra) {
+        // Inject InfinispanStore for HA mode
+        if (haEnabled && infinispanStore != null) {
+            lra.setInfinispanStore(infinispanStore);
+        }
+
         lras.putIfAbsent(lra.getId(), lra);
     }
 
@@ -263,6 +453,13 @@ public class LRAService {
     }
 
     public synchronized LongRunningAction startLRA(String baseUri, URI parentLRA, String clientId, Long timelimit) {
+        // In HA mode, check if cache is available before starting new LRA
+        if (haEnabled && infinispanStore != null && !infinispanStore.isAvailable()) {
+            String errorMsg = "Coordinator in minority partition - cannot start new LRA";
+            throw new WebApplicationException(errorMsg,
+                    Response.status(SERVICE_UNAVAILABLE).entity(errorMsg).build());
+        }
+
         LongRunningAction lra;
         int status;
 
@@ -294,6 +491,8 @@ public class LRAService {
                     .entity(errorMsg)
                     .build());
         } else {
+            // In HA mode, LRA state is automatically replicated via Infinispan
+            // No need for explicit Raft replication
             addTransaction(lra);
 
             return lra;
@@ -316,6 +515,9 @@ public class LRAService {
         }
 
         transaction.finishLRA(compensate, compensator, userData);
+
+        // In HA mode, state transitions are automatically replicated via Infinispan
+        // when the LRA calls deactivate() to save its state
 
         if (BasicAction.Current() != null) {
             if (LRALogger.logger.isInfoEnabled()) {
@@ -498,5 +700,110 @@ public class LRAService {
     private List<LRAData> getDataByStatus(Map<URI, LongRunningAction> lrasToFilter, LRAStatus status) {
         return lrasToFilter.values().stream().filter(t -> t.getLRAStatus() == status)
                 .map(LongRunningAction::getLRAData).collect(toList());
+    }
+
+    // HA-related methods
+
+    /**
+     * Initializes HA components and node ID.
+     * Called by LRARecoveryModule when HA is enabled.
+     *
+     * @param infinispanStore the Infinispan store
+     * @param distributedLockManager the distributed lock manager
+     * @param clusterCoordinator the cluster coordinator
+     */
+    public void initializeHA(InfinispanStore infinispanStore,
+            DistributedLockManager distributedLockManager,
+            ClusterCoordinator clusterCoordinator) {
+        this.infinispanStore = infinispanStore;
+        this.distributedLockManager = distributedLockManager;
+        this.clusterCoordinator = clusterCoordinator;
+        this.haEnabled = (infinispanStore != null && infinispanStore.isHaEnabled());
+
+        // Initialize node ID
+        initializeNodeId();
+
+        LRALogger.logger.infof("LRAService initialized with HA mode: %s, node ID: %s",
+                haEnabled, nodeId);
+    }
+
+    /**
+     * Initializes the node ID for this coordinator instance.
+     * Tries in order:
+     * 1. System property: lra.coordinator.node.id
+     * 2. Environment variable: HOSTNAME (Kubernetes pod name)
+     * 3. Narayana node identifier
+     */
+    private void initializeNodeId() {
+        // Try system property first
+        nodeId = System.getProperty("lra.coordinator.node.id");
+
+        if (nodeId == null || nodeId.isEmpty()) {
+            // Try environment variable (Kubernetes pod name)
+            nodeId = System.getenv("HOSTNAME");
+        }
+
+        if (nodeId == null || nodeId.isEmpty()) {
+            // Fallback to Narayana node identifier
+            try {
+                int narayanaNodeId = com.arjuna.ats.arjuna.common.arjPropertyManager
+                        .getCoreEnvironmentBean().getNodeIdentifier();
+                nodeId = "node-" + narayanaNodeId;
+            } catch (Exception e) {
+                // Final fallback
+                nodeId = "node-" + System.currentTimeMillis();
+                LRALogger.logger.warnf("Failed to get Narayana node identifier, using timestamp: %s", nodeId);
+            }
+        }
+
+        LRALogger.logger.infof("Initialized coordinator node ID: %s", nodeId);
+    }
+
+    /**
+     * Gets the node ID for this coordinator instance.
+     *
+     * @return the node ID
+     */
+    public String getNodeId() {
+        if (nodeId == null) {
+            initializeNodeId();
+        }
+        return nodeId;
+    }
+
+    /**
+     * Checks if HA mode is enabled.
+     *
+     * @return true if HA is enabled
+     */
+    public boolean isHaEnabled() {
+        return haEnabled;
+    }
+
+    /**
+     * Gets the Infinispan store (may be null if HA is disabled).
+     *
+     * @return the Infinispan store or null
+     */
+    public InfinispanStore getInfinispanStore() {
+        return infinispanStore;
+    }
+
+    /**
+     * Gets the distributed lock manager (may be null if HA is disabled).
+     *
+     * @return the distributed lock manager or null
+     */
+    public DistributedLockManager getDistributedLockManager() {
+        return distributedLockManager;
+    }
+
+    /**
+     * Gets the cluster coordinator (may be null if HA is disabled).
+     *
+     * @return the cluster coordinator or null
+     */
+    public ClusterCoordinator getClusterCoordinator() {
+        return clusterCoordinator;
     }
 }

@@ -22,6 +22,7 @@ import io.narayana.lra.Current;
 import io.narayana.lra.LRAConstants;
 import io.narayana.lra.LRAData;
 import io.narayana.lra.coordinator.domain.service.LRAService;
+import io.narayana.lra.coordinator.internal.InfinispanStore;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.ws.rs.ServiceUnavailableException;
 import jakarta.ws.rs.WebApplicationException;
@@ -63,12 +64,33 @@ public class LongRunningAction extends BasicAction {
     private ScheduledFuture<?> scheduledAbort;
     private final LRAService lraService;
     LRAParentAbstractRecord par;
+    private long timeLimit; // Added for HA state tracking
+    private InfinispanStore infinispanStore; // Optional, injected by LRAService for HA mode
 
     private static long initParticipantEnlistTimeout() {
         try {
             return ConfigProvider.getConfig().getValue(ENLIST_PARTICIPANT_LOCK_TIMEOUT, Long.class);
         } catch (Exception e) {
             return 500; // the property is unset or there is no config provider so use the default value
+        }
+    }
+
+    /**
+     * Builds the UID path segment of the LRA ID.
+     * In HA mode, embeds the node ID: {NodeId}/{Uid}
+     * In single-instance mode, uses just: {Uid}
+     *
+     * @param lraService the LRAService
+     * @return the UID path segment
+     */
+    private String buildUidPath(LRAService lraService) {
+        String uidString = get_uid().fileStringForm();
+
+        if (lraService != null && lraService.isHaEnabled()) {
+            String nodeId = lraService.getNodeId();
+            return String.format("%s/%s", nodeId, uidString);
+        } else {
+            return uidString;
         }
     }
 
@@ -87,14 +109,17 @@ public class LongRunningAction extends BasicAction {
 
         this.lraService = lraService;
 
+        // Build LRA ID with optional node ID embedding for HA mode
+        String uidPath = buildUidPath(lraService);
+
         if (parent != null) {
             this.parentId = parent.getId();
             // encode the parent in the child URI (by rights we'd use LRA_HTTP_PARENT_CONTEXT_HEADER)
             // the parent is used by children to contact parents in certain scenarios
             // BTW  this technique is historical and needs to be changed to use the header
-            this.id = Current.buildFullLRAUrl(String.format("%s/%s", baseUrl, get_uid().fileStringForm()), parent.getId());
+            this.id = Current.buildFullLRAUrl(String.format("%s/%s", baseUrl, uidPath), parent.getId());
         } else {
-            this.id = new URI(String.format("%s/%s", baseUrl, get_uid().fileStringForm()));
+            this.id = new URI(String.format("%s/%s", baseUrl, uidPath));
         }
 
         this.clientId = clientId;
@@ -174,6 +199,19 @@ public class LongRunningAction extends BasicAction {
             }
 
             os.packString(status.name());
+
+            // If HA mode is enabled, delegate to InfinispanStore
+            if (infinispanStore != null && infinispanStore.isHaEnabled() && id != null) {
+                try {
+                    LRAState state = LRAState.fromLongRunningAction(this, os);
+                    infinispanStore.saveLRA(id, state);
+                    LRALogger.logger.tracef("LRA %s saved to Infinispan", id);
+                } catch (IOException e) {
+                    LRALogger.logger.warnf(e, "Failed to save LRA %s to Infinispan, falling back to ObjectStore", id);
+                    // Continue with normal ObjectStore save
+                }
+            }
+
         } catch (IOException e) {
             LRALogger.logger.warn(LRALogger.i18nLogger.warn_saveState(e.getMessage()));
             return false;
@@ -1281,6 +1319,61 @@ public class LongRunningAction extends BasicAction {
 
     public URI getParentId() {
         return parentId;
+    }
+
+    public LocalDateTime getStartTime() {
+        return startTime;
+    }
+
+    public LocalDateTime getFinishTime() {
+        return finishTime;
+    }
+
+    public long getTimeLimit() {
+        return timeLimit;
+    }
+
+    /**
+     * Sets the InfinispanStore for HA mode persistence.
+     * Called by LRAService when HA is enabled.
+     *
+     * @param infinispanStore the Infinispan store
+     */
+    public void setInfinispanStore(InfinispanStore infinispanStore) {
+        this.infinispanStore = infinispanStore;
+    }
+
+    /**
+     * Converts this LongRunningAction to an LRAState for Infinispan storage.
+     * This is used in HA mode to persist the LRA state to the distributed cache.
+     *
+     * @return LRAState representing this LRA
+     */
+    public LRAState toLRAState() throws IOException {
+        OutputObjectState oos = new OutputObjectState();
+        if (!save_state(oos, 0)) {
+            throw new IOException("Failed to serialize LongRunningAction to OutputObjectState");
+        }
+        return LRAState.fromLongRunningAction(this, oos);
+    }
+
+    /**
+     * Restores this LongRunningAction from an LRAState loaded from Infinispan.
+     *
+     * @param state the LRAState to restore from
+     * @return true if restoration succeeded
+     */
+    public boolean fromLRAState(LRAState state) {
+        if (state == null) {
+            return false;
+        }
+
+        InputObjectState ios = state.toInputObjectState();
+        if (ios == null) {
+            return false;
+        }
+
+        return restore_state(ios, 0);
     }
 
     private boolean hasElements(RecordList list) {

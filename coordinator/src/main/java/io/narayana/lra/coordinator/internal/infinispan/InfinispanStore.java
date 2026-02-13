@@ -3,14 +3,18 @@
    SPDX-License-Identifier: Apache-2.0
  */
 
-package io.narayana.lra.coordinator.internal;
+package io.narayana.lra.coordinator.internal.infinispan;
 
 import io.narayana.lra.coordinator.domain.model.LRAState;
+import io.narayana.lra.coordinator.internal.LRAStore;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.inject.Named;
 import java.net.URI;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Map;
 import org.infinispan.Cache;
 import org.infinispan.partitionhandling.AvailabilityMode;
 
@@ -28,7 +32,7 @@ import org.infinispan.partitionhandling.AvailabilityMode;
  * - lra-failed: Failed LRAs (FailedToClose/FailedToCancel)
  */
 @ApplicationScoped
-public class InfinispanStore {
+public class InfinispanStore implements LRAStore {
 
     @Inject
     @Named("activeLRACache")
@@ -318,5 +322,48 @@ public class InfinispanStore {
      */
     public Cache<URI, LRAState> getFailedLRACache() {
         return failedLRACache;
+    }
+
+    @Override
+    public Map<URI, LRAState> getAllActiveLRAs() {
+        if (!haEnabled || getActiveLRACache() == null) {
+            return Collections.emptyMap();
+        }
+
+        try {
+            // Return the cache as a map - Infinispan Cache extends Map
+            return getActiveLRACache();
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Failed to retrieve all active LRAs");
+            return Collections.emptyMap();
+        }
+    }
+
+    @Override
+    public Collection<LRAState> getAllRecoveringLRAs() {
+        if (!haEnabled || getRecoveringLRACache() == null) {
+            return Collections.emptyList();
+        }
+
+        try {
+            return getRecoveringLRACache().values();
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Failed to retrieve all recovering LRAs");
+            return Collections.emptyList();
+        }
+    }
+
+    @Override
+    public Collection<LRAState> getAllFailedLRAs() {
+        if (!haEnabled || getFailedLRACache() == null) {
+            return Collections.emptyList();
+        }
+
+        try {
+            return getFailedLRACache().values();
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Failed to retrieve all failed LRAs");
+            return Collections.emptyList();
+        }
     }
 }

@@ -21,7 +21,7 @@ import io.narayana.lra.coordinator.domain.model.LRAParticipantRecord;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.internal.ClusterCoordinator;
 import io.narayana.lra.coordinator.internal.DistributedLockManager;
-import io.narayana.lra.coordinator.internal.InfinispanStore;
+import io.narayana.lra.coordinator.internal.LRAStore;
 import io.narayana.lra.coordinator.internal.LRARecoveryModule;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.ws.rs.NotFoundException;
@@ -48,7 +48,7 @@ public class LRAService {
     private LRARecoveryModule recoveryModule;
 
     // HA components (injected by LRARecoveryModule when HA is enabled)
-    private InfinispanStore infinispanStore;
+    private LRAStore lraStore;
     private DistributedLockManager distributedLockManager;
     private ClusterCoordinator clusterCoordinator;
     private String nodeId;
@@ -102,9 +102,9 @@ public class LRAService {
         }
 
         // In HA mode, try to load from Infinispan atomically
-        if (haEnabled && infinispanStore != null) {
+        if (haEnabled && lraStore != null) {
             // Check if cache is available (not in minority partition)
-            if (!infinispanStore.isAvailable()) {
+            if (!lraStore.isAvailable()) {
                 String errorMsg = "Coordinator in minority partition - cannot access LRA state";
                 throw new WebApplicationException(errorMsg,
                         Response.status(SERVICE_UNAVAILABLE).entity(errorMsg).build());
@@ -113,7 +113,7 @@ public class LRAService {
             // Use computeIfAbsent to atomically check and load
             lra = lras.computeIfAbsent(lraId, key -> {
                 try {
-                    io.narayana.lra.coordinator.domain.model.LRAState state = infinispanStore.loadLRA(key);
+                    io.narayana.lra.coordinator.domain.model.LRAState state = lraStore.loadLRA(key);
                     if (state != null) {
                         // Create a RecoveringLRA from the state
                         LongRunningAction recoveredLra = new LongRunningAction(this,
@@ -343,9 +343,9 @@ public class LRAService {
     }
 
     public void addTransaction(LongRunningAction lra) {
-        // Inject InfinispanStore for HA mode
-        if (haEnabled && infinispanStore != null) {
-            lra.setInfinispanStore(infinispanStore);
+        // Inject LRAStore for HA mode
+        if (haEnabled && lraStore != null) {
+            lra.setLRAStore(lraStore);
         }
 
         lras.putIfAbsent(lra.getId(), lra);
@@ -454,7 +454,7 @@ public class LRAService {
 
     public synchronized LongRunningAction startLRA(String baseUri, URI parentLRA, String clientId, Long timelimit) {
         // In HA mode, check if cache is available before starting new LRA
-        if (haEnabled && infinispanStore != null && !infinispanStore.isAvailable()) {
+        if (haEnabled && lraStore != null && !lraStore.isAvailable()) {
             String errorMsg = "Coordinator in minority partition - cannot start new LRA";
             throw new WebApplicationException(errorMsg,
                     Response.status(SERVICE_UNAVAILABLE).entity(errorMsg).build());
@@ -703,17 +703,17 @@ public class LRAService {
      * Initializes HA components and node ID.
      * Called by LRARecoveryModule when HA is enabled.
      *
-     * @param infinispanStore the Infinispan store
+     * @param lraStore the LRA store implementation
      * @param distributedLockManager the distributed lock manager
      * @param clusterCoordinator the cluster coordinator
      */
-    public void initializeHA(InfinispanStore infinispanStore,
+    public void initializeHA(LRAStore lraStore,
             DistributedLockManager distributedLockManager,
             ClusterCoordinator clusterCoordinator) {
-        this.infinispanStore = infinispanStore;
+        this.lraStore = lraStore;
         this.distributedLockManager = distributedLockManager;
         this.clusterCoordinator = clusterCoordinator;
-        this.haEnabled = (infinispanStore != null && infinispanStore.isHaEnabled());
+        this.haEnabled = (lraStore != null && lraStore.isHaEnabled());
 
         // Initialize node ID
         initializeNodeId();
@@ -776,12 +776,12 @@ public class LRAService {
     }
 
     /**
-     * Gets the Infinispan store (may be null if HA is disabled).
+     * Gets the LRA store (may be null if HA is disabled).
      *
-     * @return the Infinispan store or null
+     * @return the LRA store or null
      */
-    public InfinispanStore getInfinispanStore() {
-        return infinispanStore;
+    public LRAStore getLRAStore() {
+        return lraStore;
     }
 
     /**

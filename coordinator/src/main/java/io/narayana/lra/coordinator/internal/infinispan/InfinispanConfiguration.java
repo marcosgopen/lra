@@ -3,7 +3,7 @@
    SPDX-License-Identifier: Apache-2.0
  */
 
-package io.narayana.lra.coordinator.internal;
+package io.narayana.lra.coordinator.internal.infinispan;
 
 import io.narayana.lra.coordinator.domain.model.LRAState;
 import io.narayana.lra.logging.LRALogger;

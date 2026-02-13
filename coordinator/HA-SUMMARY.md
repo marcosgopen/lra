@@ -74,7 +74,7 @@ This implementation enables **multiple LRA coordinators to share an object store
 
 9. **`pom.xml`**
    - Added Infinispan dependencies (core + clustered-lock)
-   - Removed jgroups-raft (using built-in JGroups coordinator instead)
+
 
 ### Documentation
 

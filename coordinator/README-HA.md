@@ -274,7 +274,6 @@ See: [PARTITION-HANDLING-SUMMARY.md](PARTITION-HANDLING-SUMMARY.md)
 - Infinispan handles data replication
 - No need for consensus protocol
 
-See: [HA-SUMMARY.md](HA-SUMMARY.md#why-jgroups-coordinator-instead-of-raft)
 
 ### Q: What happens if coordinator crashes during LRA close?
 

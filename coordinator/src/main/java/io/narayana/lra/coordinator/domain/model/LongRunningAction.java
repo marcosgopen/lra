@@ -22,7 +22,7 @@ import io.narayana.lra.Current;
 import io.narayana.lra.LRAConstants;
 import io.narayana.lra.LRAData;
 import io.narayana.lra.coordinator.domain.service.LRAService;
-import io.narayana.lra.coordinator.internal.InfinispanStore;
+import io.narayana.lra.coordinator.internal.LRAStore;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.ws.rs.ServiceUnavailableException;
 import jakarta.ws.rs.WebApplicationException;
@@ -65,7 +65,7 @@ public class LongRunningAction extends BasicAction {
     private final LRAService lraService;
     LRAParentAbstractRecord par;
     private long timeLimit; // Added for HA state tracking
-    private InfinispanStore infinispanStore; // Optional, injected by LRAService for HA mode
+    private LRAStore lraStore; // Optional, injected by LRAService for HA mode
 
     private static long initParticipantEnlistTimeout() {
         try {
@@ -200,11 +200,11 @@ public class LongRunningAction extends BasicAction {
 
             os.packString(status.name());
 
-            // If HA mode is enabled, delegate to InfinispanStore
-            if (infinispanStore != null && infinispanStore.isHaEnabled() && id != null) {
+            // If HA mode is enabled, delegate to LRAStore
+            if (lraStore != null && lraStore.isHaEnabled() && id != null) {
                 try {
                     LRAState state = LRAState.fromLongRunningAction(this, os);
-                    infinispanStore.saveLRA(id, state);
+                    lraStore.saveLRA(id, state);
                     LRALogger.logger.tracef("LRA %s saved to Infinispan", id);
                 } catch (IOException e) {
                     LRALogger.logger.warnf(e, "Failed to save LRA %s to Infinispan, falling back to ObjectStore", id);
@@ -1334,13 +1334,13 @@ public class LongRunningAction extends BasicAction {
     }
 
     /**
-     * Sets the InfinispanStore for HA mode persistence.
+     * Sets the LRAStore for HA mode persistence.
      * Called by LRAService when HA is enabled.
      *
-     * @param infinispanStore the Infinispan store
+     * @param lraStore the LRA store implementation
      */
-    public void setInfinispanStore(InfinispanStore infinispanStore) {
-        this.infinispanStore = infinispanStore;
+    public void setLRAStore(LRAStore lraStore) {
+        this.lraStore = lraStore;
     }
 
     /**

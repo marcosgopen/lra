@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.narayana.lra.coordinator.domain.model.LRAState;
 import io.narayana.lra.coordinator.domain.service.LRAService;
+import io.narayana.lra.coordinator.internal.infinispan.InfinispanStore;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;

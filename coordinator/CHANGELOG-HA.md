@@ -80,7 +80,6 @@ Implemented **High Availability for LRA Coordinators** with automatic network pa
 9. **`pom.xml`**
    - Added: `infinispan-core` 15.0.0.Final
    - Added: `infinispan-clustered-lock` 15.0.0.Final
-   - Removed: `jgroups-raft` (not needed - using built-in JGroups coordinator)
    - All dependencies marked `<optional>true</optional>` (HA is optional)
 
 ### Configuration & Documentation

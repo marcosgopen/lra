@@ -19,10 +19,10 @@ import io.narayana.lra.LRAConstants;
 import io.narayana.lra.LRAData;
 import io.narayana.lra.coordinator.domain.model.LRAParticipantRecord;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
-import io.narayana.lra.coordinator.internal.ClusterCoordinator;
-import io.narayana.lra.coordinator.internal.DistributedLockManager;
-import io.narayana.lra.coordinator.internal.LRAStore;
+import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
 import io.narayana.lra.coordinator.internal.LRARecoveryModule;
+import io.narayana.lra.coordinator.internal.LRAStore;
+import io.narayana.lra.coordinator.internal.LockManager;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.WebApplicationException;
@@ -49,19 +49,19 @@ public class LRAService {
 
     // HA components (injected by LRARecoveryModule when HA is enabled)
     private LRAStore lraStore;
-    private DistributedLockManager distributedLockManager;
-    private ClusterCoordinator clusterCoordinator;
+    private LockManager lockManager;
+    private ClusterCoordinationService clusterCoordinator;
     private String nodeId;
     private boolean haEnabled = false;
 
     // Map to track distributed lock handles for cleanup
-    private final Map<URI, DistributedLockManager.LockHandle> distributedLockHandles = new ConcurrentHashMap<>();
+    private final Map<URI, LockManager.LockHandle> lockHandles = new ConcurrentHashMap<>();
 
     /**
      * Gets a transaction by LRA ID.
      *
      * This method is now race-condition free by using atomic operations.
-     * In HA mode, it will also attempt to load the LRA from Infinispan if not in memory.
+     * In HA mode, it will also attempt to load the LRA from the distributed store if not in memory.
      *
      * @param lraId the LRA ID
      * @return the LongRunningAction
@@ -101,7 +101,7 @@ public class LRAService {
             return lra;
         }
 
-        // In HA mode, try to load from Infinispan atomically
+        // In HA mode, try to load from distributed store atomically
         if (haEnabled && lraStore != null) {
             // Check if cache is available (not in minority partition)
             if (!lraStore.isAvailable()) {
@@ -120,14 +120,14 @@ public class LRAService {
                                 new com.arjuna.ats.arjuna.common.Uid(uid));
 
                         if (recoveredLra.fromLRAState(state)) {
-                            LRALogger.logger.infof("Loaded LRA %s from Infinispan", key);
+                            LRALogger.logger.infof("Loaded LRA %s from distributed store", key);
                             return recoveredLra;
                         } else {
                             LRALogger.logger.warnf("Failed to restore LRA %s from state", key);
                         }
                     }
                 } catch (Exception e) {
-                    LRALogger.logger.warnf(e, "Error loading LRA %s from Infinispan", key);
+                    LRALogger.logger.warnf(e, "Error loading LRA %s from distributed store", key);
                 }
                 return null;
             });
@@ -178,13 +178,13 @@ public class LRAService {
      */
     public synchronized ReentrantLock lockTransaction(URI lraId) {
         // In HA mode, acquire distributed lock first
-        if (haEnabled && distributedLockManager != null) {
-            DistributedLockManager.LockHandle distributedLock = distributedLockManager.acquireLock(lraId);
+        if (haEnabled && lockManager != null) {
+            LockManager.LockHandle distributedLock = lockManager.acquireLock(lraId);
             if (distributedLock == null) {
                 LRALogger.logger.warnf("Failed to acquire distributed lock for LRA %s", lraId);
                 return null;
             }
-            distributedLockHandles.put(lraId, distributedLock);
+            lockHandles.put(lraId, distributedLock);
         }
 
         // Always acquire local lock for backward compatibility
@@ -203,12 +203,12 @@ public class LRAService {
      */
     public synchronized ReentrantLock tryLockTransaction(URI lraId) {
         // In HA mode, try to acquire distributed lock first
-        if (haEnabled && distributedLockManager != null) {
-            DistributedLockManager.LockHandle distributedLock = distributedLockManager.acquireLock(lraId, 0, MILLISECONDS);
+        if (haEnabled && lockManager != null) {
+            LockManager.LockHandle distributedLock = lockManager.acquireLock(lraId, 0, MILLISECONDS);
             if (distributedLock == null) {
                 return null; // Failed to acquire distributed lock
             }
-            distributedLockHandles.put(lraId, distributedLock);
+            lockHandles.put(lraId, distributedLock);
         }
 
         // Try to acquire local lock
@@ -232,13 +232,13 @@ public class LRAService {
      */
     public synchronized ReentrantLock tryTimedLockTransaction(URI lraId, long timeout) {
         // In HA mode, try to acquire distributed lock first with timeout
-        if (haEnabled && distributedLockManager != null) {
-            DistributedLockManager.LockHandle distributedLock = distributedLockManager.acquireLock(lraId, timeout,
+        if (haEnabled && lockManager != null) {
+            LockManager.LockHandle distributedLock = lockManager.acquireLock(lraId, timeout,
                     MILLISECONDS);
             if (distributedLock == null) {
                 return null; // Failed to acquire distributed lock
             }
-            distributedLockHandles.put(lraId, distributedLock);
+            lockHandles.put(lraId, distributedLock);
         }
 
         // Try to acquire local lock with timeout
@@ -266,7 +266,7 @@ public class LRAService {
      */
     void releaseDistributedLock(URI lraId) {
         if (haEnabled) {
-            DistributedLockManager.LockHandle handle = distributedLockHandles.remove(lraId);
+            LockManager.LockHandle handle = lockHandles.remove(lraId);
             if (handle != null) {
                 try {
                     handle.release();
@@ -704,14 +704,14 @@ public class LRAService {
      * Called by LRARecoveryModule when HA is enabled.
      *
      * @param lraStore the LRA store implementation
-     * @param distributedLockManager the distributed lock manager
+     * @param lockManager the lock manager
      * @param clusterCoordinator the cluster coordinator
      */
     public void initializeHA(LRAStore lraStore,
-            DistributedLockManager distributedLockManager,
-            ClusterCoordinator clusterCoordinator) {
+            LockManager lockManager,
+            ClusterCoordinationService clusterCoordinator) {
         this.lraStore = lraStore;
-        this.distributedLockManager = distributedLockManager;
+        this.lockManager = lockManager;
         this.clusterCoordinator = clusterCoordinator;
         this.haEnabled = (lraStore != null && lraStore.isHaEnabled());
 
@@ -785,12 +785,12 @@ public class LRAService {
     }
 
     /**
-     * Gets the distributed lock manager (may be null if HA is disabled).
+     * Gets the lock manager (may be null if HA is disabled).
      *
-     * @return the distributed lock manager or null
+     * @return the lock manager or null
      */
-    public DistributedLockManager getDistributedLockManager() {
-        return distributedLockManager;
+    public LockManager getLockManager() {
+        return lockManager;
     }
 
     /**
@@ -798,7 +798,7 @@ public class LRAService {
      *
      * @return the cluster coordinator or null
      */
-    public ClusterCoordinator getClusterCoordinator() {
+    public ClusterCoordinationService getClusterCoordinator() {
         return clusterCoordinator;
     }
 }

@@ -17,7 +17,7 @@ import org.eclipse.microprofile.lra.annotation.LRAStatus;
 
 /**
  * Serializable representation of an LRA state.
- * Used for storing LRA state in distributed caches (Infinispan) or for
+ * Used for storing LRA state in distributed stores or for
  * transferring state between coordinators in an HA setup.
  *
  * This class is immutable and thread-safe.

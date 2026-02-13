@@ -3,8 +3,9 @@
    SPDX-License-Identifier: Apache-2.0
  */
 
-package io.narayana.lra.coordinator.internal;
+package io.narayana.lra.coordinator.internal.infinispan;
 
+import io.narayana.lra.coordinator.internal.LockManager;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.net.URI;
@@ -16,16 +17,16 @@ import org.infinispan.lock.api.ClusteredLockManager;
 import org.infinispan.manager.EmbeddedCacheManager;
 
 /**
- * Manages distributed locks for LRAs using Infinispan Clustered Locks.
+ * Infinispan-based implementation of distributed lock management for LRAs.
  *
- * In HA mode, distributed locks ensure that only one coordinator at a time
+ * Uses Infinispan Clustered Locks to ensure that only one coordinator at a time
  * can modify a specific LRA, preventing conflicts when multiple coordinators
  * can access the same LRA state.
  *
  * This is critical for the requirement: "any coordinator can manage any LRA"
  */
 @ApplicationScoped
-public class DistributedLockManager {
+public class InfinispanLockManager implements LockManager {
 
     private ClusteredLockManager lockManager;
     private final ConcurrentHashMap<URI, ClusteredLock> locks = new ConcurrentHashMap<>();
@@ -45,9 +46,9 @@ public class DistributedLockManager {
             // In Infinispan 16.x, use factory method to get ClusteredLockManager
             this.lockManager = EmbeddedClusteredLockManagerFactory.from(cacheManager);
             this.initialized = true;
-            LRALogger.logger.info("DistributedLockManager initialized");
+            LRALogger.logger.info("InfinispanLockManager initialized");
         } catch (Exception e) {
-            LRALogger.logger.warnf(e, "Failed to initialize DistributedLockManager");
+            LRALogger.logger.warnf(e, "Failed to initialize InfinispanLockManager");
         }
     }
 
@@ -57,7 +58,8 @@ public class DistributedLockManager {
      * @param lraId the LRA ID
      * @return a lock handle, or null if the lock cannot be acquired
      */
-    public LockHandle acquireLock(URI lraId) {
+    @Override
+    public LockManager.LockHandle acquireLock(URI lraId) {
         if (!initialized) {
             return null;
         }
@@ -80,7 +82,8 @@ public class DistributedLockManager {
      * @param unit the timeout unit
      * @return a lock handle, or null if the lock cannot be acquired
      */
-    public LockHandle acquireLock(URI lraId, long timeout, TimeUnit unit) {
+    @Override
+    public LockManager.LockHandle acquireLock(URI lraId, long timeout, TimeUnit unit) {
         if (!initialized) {
             return null;
         }
@@ -130,6 +133,7 @@ public class DistributedLockManager {
      *
      * @return true if initialized
      */
+    @Override
     public boolean isInitialized() {
         return initialized;
     }
@@ -137,7 +141,7 @@ public class DistributedLockManager {
     /**
      * Handle for a distributed lock that must be released when done.
      */
-    public static class LockHandle {
+    public static class LockHandle implements LockManager.LockHandle {
         private final URI lraId;
         private final ClusteredLock lock;
         private boolean released = false;
@@ -150,6 +154,7 @@ public class DistributedLockManager {
         /**
          * Releases the distributed lock.
          */
+        @Override
         public void release() {
             if (released) {
                 return;
@@ -167,10 +172,12 @@ public class DistributedLockManager {
             }
         }
 
+        @Override
         public URI getLraId() {
             return lraId;
         }
 
+        @Override
         public boolean isReleased() {
             return released;
         }

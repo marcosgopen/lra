@@ -6,6 +6,8 @@
 package io.narayana.lra.coordinator.internal.infinispan;
 
 import io.narayana.lra.coordinator.domain.model.LRAState;
+import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
+import io.narayana.lra.coordinator.internal.LockManager;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -79,11 +81,14 @@ public class InfinispanConfiguration {
 
             cacheManager = new DefaultCacheManager(globalConfig.build());
 
+            // Get cache mode from configuration (default: REPL_SYNC)
+            CacheMode cacheMode = getCacheMode();
+
             // Define cache configurations with partition handling
             ConfigurationBuilder activeCacheConfig = new ConfigurationBuilder();
             activeCacheConfig
                     .clustering()
-                    .cacheMode(CacheMode.REPL_SYNC)
+                    .cacheMode(cacheMode)
                     .partitionHandling()
                     .whenSplit(org.infinispan.partitionhandling.PartitionHandling.DENY_READ_WRITES)
                     .mergePolicy(org.infinispan.conflict.MergePolicy.PREFERRED_ALWAYS)
@@ -95,7 +100,7 @@ public class InfinispanConfiguration {
             ConfigurationBuilder recoveringCacheConfig = new ConfigurationBuilder();
             recoveringCacheConfig
                     .clustering()
-                    .cacheMode(CacheMode.REPL_SYNC)
+                    .cacheMode(cacheMode)
                     .partitionHandling()
                     .whenSplit(org.infinispan.partitionhandling.PartitionHandling.DENY_READ_WRITES)
                     .mergePolicy(org.infinispan.conflict.MergePolicy.PREFERRED_ALWAYS)
@@ -107,7 +112,7 @@ public class InfinispanConfiguration {
             ConfigurationBuilder failedCacheConfig = new ConfigurationBuilder();
             failedCacheConfig
                     .clustering()
-                    .cacheMode(CacheMode.REPL_SYNC)
+                    .cacheMode(cacheMode)
                     .partitionHandling()
                     .whenSplit(org.infinispan.partitionhandling.PartitionHandling.DENY_READ_WRITES)
                     .mergePolicy(org.infinispan.conflict.MergePolicy.PREFERRED_ALWAYS)
@@ -194,6 +199,44 @@ public class InfinispanConfiguration {
     }
 
     /**
+     * Produces the cluster coordinator bean.
+     *
+     * @return the cluster coordinator
+     */
+    @Produces
+    @ApplicationScoped
+    public ClusterCoordinationService clusterCoordinator() {
+        if (!initialized) {
+            initialize();
+        }
+        if (cacheManager == null) {
+            return null;
+        }
+        InfinispanClusterCoordinator coordinator = new InfinispanClusterCoordinator();
+        coordinator.initialize(cacheManager);
+        return coordinator;
+    }
+
+    /**
+     * Produces the lock manager bean.
+     *
+     * @return the lock manager
+     */
+    @Produces
+    @ApplicationScoped
+    public LockManager lockManager() {
+        if (!initialized) {
+            initialize();
+        }
+        if (cacheManager == null) {
+            return null;
+        }
+        InfinispanLockManager lockMgr = new InfinispanLockManager();
+        lockMgr.initialize(cacheManager);
+        return lockMgr;
+    }
+
+    /**
      * Checks if Infinispan is initialized.
      *
      * @return true if initialized
@@ -229,6 +272,29 @@ public class InfinispanConfiguration {
             location = System.getProperty("java.io.tmpdir") + "/lra-infinispan";
         }
         return location;
+    }
+
+    /**
+     * Gets the cache mode from configuration.
+     * Supported modes: REPL_SYNC, REPL_ASYNC, DIST_SYNC, DIST_ASYNC, LOCAL
+     *
+     * System property: lra.coordinator.infinispan.cache.mode
+     * Default: REPL_SYNC
+     *
+     * @return the configured cache mode
+     */
+    private CacheMode getCacheMode() {
+        String mode = System.getProperty("lra.coordinator.infinispan.cache.mode", "REPL_SYNC");
+
+        try {
+            CacheMode cacheMode = CacheMode.valueOf(mode.toUpperCase());
+            LRALogger.logger.infof("Infinispan cache mode: %s", cacheMode);
+            return cacheMode;
+        } catch (IllegalArgumentException e) {
+            LRALogger.logger.warnf("Invalid cache mode '%s', using default REPL_SYNC. " +
+                    "Valid modes are: REPL_SYNC, REPL_ASYNC, DIST_SYNC, DIST_ASYNC, LOCAL", mode);
+            return CacheMode.REPL_SYNC;
+        }
     }
 
     /**

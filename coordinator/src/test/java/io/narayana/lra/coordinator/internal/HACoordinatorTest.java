@@ -9,6 +9,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.narayana.lra.coordinator.domain.model.LRAState;
 import io.narayana.lra.coordinator.domain.service.LRAService;
+import io.narayana.lra.coordinator.internal.infinispan.InfinispanConfiguration;
+import io.narayana.lra.coordinator.internal.infinispan.InfinispanLockManager;
 import io.narayana.lra.coordinator.internal.infinispan.InfinispanStore;
 import java.net.URI;
 import java.util.ArrayList;
@@ -40,7 +42,7 @@ class HACoordinatorTest {
 
     private List<EmbeddedCacheManager> cacheManagers;
     private List<InfinispanStore> stores;
-    private List<DistributedLockManager> lockManagers;
+    private List<InfinispanLockManager> lockManagers;
     private List<LRAService> services;
 
     @BeforeEach
@@ -106,8 +108,8 @@ class HACoordinatorTest {
             // Create InfinispanStore for this node
             InfinispanStore store = createInfinispanStore(cacheManager);
 
-            // Create DistributedLockManager
-            DistributedLockManager lockManager = new DistributedLockManager();
+            // Create InfinispanLockManager
+            InfinispanLockManager lockManager = new InfinispanLockManager();
             lockManager.initialize(cacheManager);
 
             // Create LRAService
@@ -228,13 +230,13 @@ class HACoordinatorTest {
         URI lraId = URI.create("http://localhost:8080/lra-coordinator/test-lra-4");
 
         // When: Node 0 acquires lock
-        DistributedLockManager.LockHandle lock0 = lockManagers.get(0).acquireLock(lraId, 1, TimeUnit.SECONDS);
+        LockManager.LockHandle lock0 = lockManagers.get(0).acquireLock(lraId, 1, TimeUnit.SECONDS);
 
         // Then: Lock acquired successfully
         assertNotNull(lock0);
 
         // And: Node 1 cannot acquire the same lock (already held)
-        DistributedLockManager.LockHandle lock1 = lockManagers.get(1).acquireLock(lraId, 100, TimeUnit.MILLISECONDS);
+        LockManager.LockHandle lock1 = lockManagers.get(1).acquireLock(lraId, 100, TimeUnit.MILLISECONDS);
 
         // In real clustering with JGroups, this would fail
         // In local mode, it may succeed because there's no actual network coordination

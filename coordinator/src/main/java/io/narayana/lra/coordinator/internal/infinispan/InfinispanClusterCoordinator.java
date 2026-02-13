@@ -3,8 +3,9 @@
    SPDX-License-Identifier: Apache-2.0
  */
 
-package io.narayana.lra.coordinator.internal;
+package io.narayana.lra.coordinator.internal.infinispan;
 
+import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -20,7 +21,7 @@ import org.infinispan.notifications.cachemanagerlistener.event.ViewChangedEvent;
 import org.infinispan.remoting.transport.Address;
 
 /**
- * Manages cluster coordination and leader election for LRA coordinators.
+ * Infinispan-based implementation of cluster coordination and leader election.
  *
  * Uses Infinispan's built-in coordinator election (based on JGroups view).
  * This is simpler than Raft and sufficient for LRA recovery coordination.
@@ -31,12 +32,12 @@ import org.infinispan.remoting.transport.Address;
  */
 @ApplicationScoped
 @Listener
-public class ClusterCoordinator {
+public class InfinispanClusterCoordinator implements ClusterCoordinationService {
 
     private EmbeddedCacheManager cacheManager;
     private boolean initialized = false;
     private volatile boolean isCoordinator = false;
-    private final List<CoordinatorChangeListener> listeners = new CopyOnWriteArrayList<>();
+    private final List<ClusterCoordinationService.CoordinatorChangeListener> listeners = new CopyOnWriteArrayList<>();
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
 
     /**
@@ -63,10 +64,10 @@ public class ClusterCoordinator {
             scheduler.scheduleWithFixedDelay(this::checkCoordinatorStatus, 10, 10, TimeUnit.SECONDS);
 
             initialized = true;
-            LRALogger.logger.infof("ClusterCoordinator initialized (isCoordinator=%s)", isCoordinator);
+            LRALogger.logger.infof("InfinispanClusterCoordinator initialized (isCoordinator=%s)", isCoordinator);
 
         } catch (Exception e) {
-            LRALogger.logger.warnf(e, "Failed to initialize ClusterCoordinator");
+            LRALogger.logger.warnf(e, "Failed to initialize InfinispanClusterCoordinator");
         }
     }
 
@@ -128,7 +129,8 @@ public class ClusterCoordinator {
      *
      * @param listener the listener
      */
-    public void addCoordinatorChangeListener(CoordinatorChangeListener listener) {
+    @Override
+    public void addCoordinatorChangeListener(ClusterCoordinationService.CoordinatorChangeListener listener) {
         listeners.add(listener);
     }
 
@@ -137,7 +139,8 @@ public class ClusterCoordinator {
      *
      * @param listener the listener
      */
-    public void removeCoordinatorChangeListener(CoordinatorChangeListener listener) {
+    @Override
+    public void removeCoordinatorChangeListener(ClusterCoordinationService.CoordinatorChangeListener listener) {
         listeners.remove(listener);
     }
 
@@ -145,7 +148,7 @@ public class ClusterCoordinator {
      * Notifies listeners that this node became the coordinator.
      */
     private void notifyBecameCoordinator() {
-        for (CoordinatorChangeListener listener : listeners) {
+        for (ClusterCoordinationService.CoordinatorChangeListener listener : listeners) {
             try {
                 listener.onBecameCoordinator();
             } catch (Exception e) {
@@ -158,7 +161,7 @@ public class ClusterCoordinator {
      * Notifies listeners that this node lost coordinator status.
      */
     private void notifyLostCoordinator() {
-        for (CoordinatorChangeListener listener : listeners) {
+        for (ClusterCoordinationService.CoordinatorChangeListener listener : listeners) {
             try {
                 listener.onLostCoordinator();
             } catch (Exception e) {
@@ -172,6 +175,7 @@ public class ClusterCoordinator {
      *
      * @return true if this node is the coordinator
      */
+    @Override
     public boolean isCoordinator() {
         return isCoordinator;
     }
@@ -181,6 +185,7 @@ public class ClusterCoordinator {
      *
      * @return true if initialized
      */
+    @Override
     public boolean isInitialized() {
         return initialized;
     }
@@ -194,25 +199,10 @@ public class ClusterCoordinator {
         if (cacheManager != null) {
             try {
                 cacheManager.removeListener(this);
-                LRALogger.logger.info("Shutting down ClusterCoordinator");
+                LRALogger.logger.info("Shutting down InfinispanClusterCoordinator");
             } catch (Exception e) {
-                LRALogger.logger.warnf(e, "Error during ClusterCoordinator shutdown");
+                LRALogger.logger.warnf(e, "Error during InfinispanClusterCoordinator shutdown");
             }
         }
-    }
-
-    /**
-     * Listener for coordinator changes.
-     */
-    public interface CoordinatorChangeListener {
-        /**
-         * Called when this node becomes the cluster coordinator.
-         */
-        void onBecameCoordinator();
-
-        /**
-         * Called when this node loses cluster coordinator status.
-         */
-        void onLostCoordinator();
     }
 }

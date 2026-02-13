@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.domain.service.LRAService;
+import io.narayana.lra.coordinator.internal.infinispan.InfinispanClusterCoordinator;
 import io.narayana.lra.coordinator.internal.infinispan.InfinispanStore;
 import java.net.URI;
 import org.junit.jupiter.api.AfterEach;
@@ -223,8 +224,8 @@ class SimpleHATest {
 
     @Test
     void testClusterCoordinatorInitialization() {
-        // Given/When: ClusterCoordinator without cache manager
-        ClusterCoordinator coordinator = new ClusterCoordinator();
+        // Given/When: InfinispanClusterCoordinator without cache manager
+        InfinispanClusterCoordinator coordinator = new InfinispanClusterCoordinator();
 
         // Then: Should not be initialized yet
         assertFalse(coordinator.isInitialized());
@@ -232,13 +233,13 @@ class SimpleHATest {
 
     @Test
     void testClusterCoordinatorListeners() {
-        // Given: ClusterCoordinator
-        ClusterCoordinator coordinator = new ClusterCoordinator();
+        // Given: InfinispanClusterCoordinator
+        InfinispanClusterCoordinator coordinator = new InfinispanClusterCoordinator();
 
         boolean[] becameCoordinator = { false };
         boolean[] lostCoordinator = { false };
 
-        ClusterCoordinator.CoordinatorChangeListener listener = new ClusterCoordinator.CoordinatorChangeListener() {
+        ClusterCoordinationService.CoordinatorChangeListener listener = new ClusterCoordinationService.CoordinatorChangeListener() {
             @Override
             public void onBecameCoordinator() {
                 becameCoordinator[0] = true;

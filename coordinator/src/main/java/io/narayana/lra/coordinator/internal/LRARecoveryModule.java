@@ -20,8 +20,6 @@ import com.arjuna.ats.arjuna.state.OutputObjectState;
 import io.narayana.lra.coordinator.domain.model.FailedLongRunningAction;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.domain.service.LRAService;
-import io.narayana.lra.coordinator.internal.infinispan.InfinispanConfiguration;
-import io.narayana.lra.coordinator.internal.infinispan.InfinispanStore;
 import io.narayana.lra.logging.LRALogger;
 import java.io.IOException;
 import java.net.URI;
@@ -35,12 +33,12 @@ import java.util.function.Consumer;
 import org.eclipse.microprofile.lra.annotation.LRAStatus;
 
 public class LRARecoveryModule implements RecoveryModule,
-        ClusterCoordinator.CoordinatorChangeListener {
+        ClusterCoordinationService.CoordinatorChangeListener {
 
     // HA components
     private LRAStore lraStore;
-    private DistributedLockManager distributedLockManager;
-    private ClusterCoordinator clusterCoordinator;
+    private LockManager lockManager;
+    private ClusterCoordinationService clusterCoordinator;
     private volatile boolean isRecoveryLeader = false;
     private volatile boolean haEnabled = false;
 
@@ -69,13 +67,13 @@ public class LRARecoveryModule implements RecoveryModule,
 
             // Try to get HA components from CDI
             this.lraStore = tryGetBean(cdi, LRAStore.class);
-            this.distributedLockManager = tryGetBean(cdi, DistributedLockManager.class);
-            this.clusterCoordinator = tryGetBean(cdi, ClusterCoordinator.class);
+            this.lockManager = tryGetBean(cdi, LockManager.class);
+            this.clusterCoordinator = tryGetBean(cdi, ClusterCoordinationService.class);
 
             // If we got at least the LRAStore, initialize HA mode
             if (lraStore != null) {
                 this.haEnabled = lraStore.isHaEnabled();
-                service.initializeHA(lraStore, distributedLockManager, clusterCoordinator);
+                service.initializeHA(lraStore, lockManager, clusterCoordinator);
 
                 // Register for cluster coordinator change notifications
                 if (clusterCoordinator != null && clusterCoordinator.isInitialized()) {
@@ -213,43 +211,34 @@ public class LRARecoveryModule implements RecoveryModule,
 
     /**
      * Recovers LRA transactions.
-     * In HA mode, loads from Infinispan recovering cache.
+     * In HA mode, loads from distributed store.
      * In single-instance mode, loads from ObjectStore.
      */
     private synchronized void recoverTransactions() {
         if (haEnabled && lraStore != null) {
-            recoverTransactionsFromInfinispan();
+            recoverTransactionsFromDistributedStore();
         } else {
             recoverTransactionsFromObjectStore();
         }
     }
 
     /**
-     * Recovers LRAs from Infinispan (HA mode).
+     * Recovers LRAs from distributed store (HA mode).
      * Uses distributed locks to coordinate recovery across cluster.
      */
-    private void recoverTransactionsFromInfinispan() {
+    private void recoverTransactionsFromDistributedStore() {
         if (LRALogger.logger.isDebugEnabled()) {
-            LRALogger.logger.debug("LRARecoveryModule: recovering transactions from Infinispan");
+            LRALogger.logger.debug("LRARecoveryModule: recovering transactions from distributed store");
         }
 
         try {
-            // Get the recovering cache from Infinispan
-            org.infinispan.manager.EmbeddedCacheManager cacheManager = lraStore instanceof InfinispanStore
-                    ? getCacheManagerFromStore((InfinispanStore) lraStore)
-                    : null;
+            // Get all recovering LRAs from the store
+            Collection<io.narayana.lra.coordinator.domain.model.LRAState> recoveringLRAs = lraStore.getAllRecoveringLRAs();
 
-            if (cacheManager == null) {
-                LRALogger.logger.warn("Cache manager not available, falling back to ObjectStore recovery");
-                recoverTransactionsFromObjectStore();
-                return;
-            }
-
-            org.infinispan.Cache<URI, io.narayana.lra.coordinator.domain.model.LRAState> recoveringCache = cacheManager
-                    .getCache(InfinispanConfiguration.RECOVERING_LRA_CACHE_NAME);
-
-            if (recoveringCache == null) {
-                LRALogger.logger.warn("Recovering cache not available");
+            if (recoveringLRAs == null || recoveringLRAs.isEmpty()) {
+                if (LRALogger.logger.isTraceEnabled()) {
+                    LRALogger.logger.trace("No recovering LRAs found in distributed store");
+                }
                 return;
             }
 
@@ -257,14 +246,13 @@ public class LRARecoveryModule implements RecoveryModule,
             int lockedCount = 0;
 
             // Iterate over all recovering LRAs
-            for (java.util.Map.Entry<URI, io.narayana.lra.coordinator.domain.model.LRAState> entry : recoveringCache
-                    .entrySet()) {
-                URI lraId = entry.getKey();
+            for (io.narayana.lra.coordinator.domain.model.LRAState state : recoveringLRAs) {
+                URI lraId = state.getId();
 
                 // Try to acquire distributed lock (with short timeout to avoid blocking)
-                DistributedLockManager.LockHandle lockHandle = null;
-                if (distributedLockManager != null) {
-                    lockHandle = distributedLockManager.acquireLock(lraId, 100,
+                LockManager.LockHandle lockHandle = null;
+                if (lockManager != null) {
+                    lockHandle = lockManager.acquireLock(lraId, 100,
                             java.util.concurrent.TimeUnit.MILLISECONDS);
                     if (lockHandle == null) {
                         // Another node is recovering this LRA
@@ -279,10 +267,10 @@ public class LRARecoveryModule implements RecoveryModule,
 
                 try {
                     // Recover this LRA
-                    doRecoverTransactionFromState(lraId, entry.getValue());
+                    doRecoverTransactionFromState(lraId, state);
                     recoveryCount++;
                 } catch (Exception e) {
-                    LRALogger.logger.warnf(e, "Error recovering LRA %s from Infinispan", lraId);
+                    LRALogger.logger.warnf(e, "Error recovering LRA %s from distributed store", lraId);
                 } finally {
                     // Release distributed lock
                     if (lockHandle != null) {
@@ -297,12 +285,12 @@ public class LRARecoveryModule implements RecoveryModule,
 
             if (LRALogger.logger.isDebugEnabled()) {
                 LRALogger.logger.debugf(
-                        "LRARecoveryModule: Recovered %d LRAs from Infinispan (%d skipped - locked by other nodes)",
+                        "LRARecoveryModule: Recovered %d LRAs from distributed store (%d skipped - locked by other nodes)",
                         recoveryCount, lockedCount);
             }
 
         } catch (Exception e) {
-            LRALogger.logger.errorf(e, "Error during Infinispan recovery, falling back to ObjectStore");
+            LRALogger.logger.errorf(e, "Error during distributed store recovery, falling back to ObjectStore");
             recoverTransactionsFromObjectStore();
         }
     }
@@ -347,9 +335,9 @@ public class LRARecoveryModule implements RecoveryModule,
 
                     // Acquire distributed lock to prevent multiple coordinators
                     // from timing out the same LRA
-                    DistributedLockManager.LockHandle lockHandle = null;
-                    if (distributedLockManager != null) {
-                        lockHandle = distributedLockManager.acquireLock(lraId, 100, TimeUnit.MILLISECONDS);
+                    LockManager.LockHandle lockHandle = null;
+                    if (lockManager != null) {
+                        lockHandle = lockManager.acquireLock(lraId, 100, TimeUnit.MILLISECONDS);
                         if (lockHandle == null) {
                             // Another node is handling this timeout
                             lockedCount++;
@@ -431,73 +419,43 @@ public class LRARecoveryModule implements RecoveryModule,
     }
 
     /**
-     * Helper method to get cache manager from InfinispanStore implementation.
-     * Uses CDI to access the InfinispanConfiguration.
-     * This method is implementation-specific and only works with InfinispanStore.
-     */
-    private org.infinispan.manager.EmbeddedCacheManager getCacheManagerFromStore(InfinispanStore store) {
-        try {
-            // Try to get InfinispanConfiguration via CDI
-            jakarta.enterprise.inject.spi.CDI<Object> cdi = jakarta.enterprise.inject.spi.CDI.current();
-            InfinispanConfiguration config = tryGetBean(cdi, InfinispanConfiguration.class);
-            if (config != null) {
-                return config.cacheManager();
-            }
-        } catch (Exception e) {
-            LRALogger.logger.debugf("Could not get cache manager via CDI: %s", e.getMessage());
-        }
-        return null;
-    }
-
-    /**
-     * Recovers a single LRA from its LRAState (Infinispan recovery).
+     * Recovers a single LRA from its LRAState (distributed store recovery).
      */
     private void doRecoverTransactionFromState(URI lraId, io.narayana.lra.coordinator.domain.model.LRAState state) {
         try {
             // Extract UID from LRA ID
             String uidString = io.narayana.lra.LRAConstants.getLRAUid(lraId);
             com.arjuna.ats.arjuna.common.Uid recoverUid = new com.arjuna.ats.arjuna.common.Uid(uidString);
-
             // Get transaction status (may not be available in distributed environment)
             int theStatus = ActionStatus.COMMITTED; // Default assumption
-
             // Create RecoveringLRA from the state
             RecoveringLRA lra = new RecoveringLRA(service, recoverUid, theStatus);
-
             // Restore state from LRAState
             if (!lra.fromLRAState(state)) {
                 LRALogger.logger.warnf("Failed to restore LRA %s from state", lraId);
                 return;
             }
-
             LRAStatus lraStatus = lra.getLRAStatus();
-
             // Handle failed LRAs
             if (LRAStatus.FailedToCancel.equals(lraStatus) || LRAStatus.FailedToClose.equals(lraStatus)) {
                 moveEntryToFailedLRAPath(lraId, state);
                 return;
             }
-
             // Add to LRAService if not already known
             if (!service.hasTransaction(lra.getId())) {
                 service.addTransaction(lra);
             }
-
             if (LRALogger.logger.isDebugEnabled()) {
-                LRALogger.logger.debugf("LRARecoveryModule: recovering LRA %s, status: %s",
-                        lraId, lraStatus);
+                LRALogger.logger.debugf("LRARecoveryModule: recovering LRA %s, status: %s", lraId, lraStatus);
             }
-
             // Replay phase 2 if necessary
             boolean inFlight = (lraStatus == LRAStatus.Active);
             if (!inFlight && lra.hasPendingActions()) {
                 lra.replayPhase2();
-
                 if (!lra.isRecovering()) {
                     service.finished(lra, false);
                 }
             }
-
         } catch (Exception e) {
             LRALogger.logger.warnf(e, "Error recovering LRA %s", lraId);
         }
@@ -592,10 +550,10 @@ public class LRARecoveryModule implements RecoveryModule,
             // In HA mode, use LRAStore.moveToFailed() which is atomic
             try {
                 lraStore.moveToFailed(lraId);
-                LRALogger.logger.infof("Failed LRA %s moved to failed state in Infinispan", lraId);
+                LRALogger.logger.infof("Failed LRA %s moved to failed state in distributed store", lraId);
                 return true;
             } catch (Exception e) {
-                LRALogger.logger.warnf(e, "Failed to move LRA %s to failed state in Infinispan", lraId);
+                LRALogger.logger.warnf(e, "Failed to move LRA %s to failed state in distributed store", lraId);
                 return false;
             }
         } else {

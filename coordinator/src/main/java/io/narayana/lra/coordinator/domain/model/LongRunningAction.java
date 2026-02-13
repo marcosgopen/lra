@@ -205,9 +205,9 @@ public class LongRunningAction extends BasicAction {
                 try {
                     LRAState state = LRAState.fromLongRunningAction(this, os);
                     lraStore.saveLRA(id, state);
-                    LRALogger.logger.tracef("LRA %s saved to Infinispan", id);
+                    LRALogger.logger.tracef("LRA %s saved to distributed store", id);
                 } catch (IOException e) {
-                    LRALogger.logger.warnf(e, "Failed to save LRA %s to Infinispan, falling back to ObjectStore", id);
+                    LRALogger.logger.warnf(e, "Failed to save LRA %s to distributed store, falling back to ObjectStore", id);
                     // Continue with normal ObjectStore save
                 }
             }
@@ -1344,8 +1344,8 @@ public class LongRunningAction extends BasicAction {
     }
 
     /**
-     * Converts this LongRunningAction to an LRAState for Infinispan storage.
-     * This is used in HA mode to persist the LRA state to the distributed cache.
+     * Converts this LongRunningAction to an LRAState for distributed storage.
+     * This is used in HA mode to persist the LRA state to the distributed store.
      *
      * @return LRAState representing this LRA
      */
@@ -1358,7 +1358,7 @@ public class LongRunningAction extends BasicAction {
     }
 
     /**
-     * Restores this LongRunningAction from an LRAState loaded from Infinispan.
+     * Restores this LongRunningAction from an LRAState loaded from distributed storage.
      *
      * @param state the LRAState to restore from
      * @return true if restoration succeeded

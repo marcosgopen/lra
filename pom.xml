@@ -330,6 +330,11 @@
         </exclusions>
       </dependency>
       <dependency>
+        <groupId>io.smallrye.config</groupId>
+        <artifactId>smallrye-config-core</artifactId>
+        <version>${version.io.smallrye.smallrye-config}</version>
+      </dependency>
+      <dependency>
         <groupId>io.smallrye.stork</groupId>
         <artifactId>stork-core</artifactId>
         <version>${version.io.smallrye.smallrye-stork}</version>

@@ -35,6 +35,23 @@
     <dependency>
       <groupId>org.jboss.narayana.lra</groupId>
       <artifactId>lra-test-arquillian-extension</artifactId>
+      <exclusions>
+        <exclusion>
+          <groupId>*</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>jakarta.enterprise.concurrent</groupId>
+      <artifactId>jakarta.enterprise.concurrent-api</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.vintage</groupId>
+      <artifactId>junit-vintage-engine</artifactId>
+      <version>${version.junit}</version>
+      <scope>test</scope>
     </dependency>
   </dependencies>
 

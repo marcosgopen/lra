@@ -1,11 +1,11 @@
 = Context propagation test for Quarkus
 
-WildFly and most other servers use Jakarta Concurrency for context propagation when doing async requests. This is covered by the io.narayana.lra.arquillian.LRAAsyncLRAIT test in the lra-test-basic module.
+WildFly and most other servers use Jakarta Concurrency for context propagation when doing async requests. This is covered by the io.narayana.lra.arquillian.quarkus.LRAAsyncLRAIT test in the lra-test-quarkus-context-test module.
 
 This test can be executed using:
 
 ```
-mvn clean install -Parq,download -pl :lra-test-basic -Dit.test=io.narayana.lra.arquillian.LRAAsyncLRAIT
+mvn clean install -Parq,download -pl :lra-test-quarkus-context-test -Dit.test=io.narayana.lra.arquillian.quarkus.LRAAsyncLRAIT
 ```
 
 However, Quarkus uses an older and non-maintained API called MicroProfile Context Propagation for this. MicroProfile Context Propagation moved to Jakarta Concurrency, so most other servers (specifically WildFly) have dropped support for this. Older WildFly versions do support it using a feature pack.

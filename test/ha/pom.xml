@@ -18,7 +18,11 @@
   <description>LRA High Availability clustering integration tests with WildFly and Infinispan</description>
 
   <properties>
-    <skip.wildfly.plugin>false</skip.wildfly.plugin>
+    <!-- Default: run only fast component tests. Profiles override to select different suites. -->
+    <ha.test.includes>**/HAClusteringIT.java</ha.test.includes>
+    <ha.test.timeout>300</ha.test.timeout>
+    <!-- HA tests manage their own containers; disable the parent's wildfly-maven-plugin -->
+    <skip.wildfly.plugin>true</skip.wildfly.plugin>
     <wildfly.config>standalone-ha.xml</wildfly.config>
   </properties>
 
@@ -63,10 +67,35 @@
       <scope>test</scope>
     </dependency>
 
+    <!-- LRA Client for programmatic LRA operations in tests -->
+    <dependency>
+      <groupId>org.jboss.narayana.lra</groupId>
+      <artifactId>lra-client</artifactId>
+      <version>${project.version}</version>
+      <scope>compile</scope>
+    </dependency>
+
     <!-- REST client for testing -->
     <dependency>
       <groupId>org.jboss.resteasy</groupId>
       <artifactId>resteasy-client</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.jboss.resteasy</groupId>
+      <artifactId>resteasy-jackson2-provider</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- ShrinkWrap Maven Resolver for building coordinator WAR deployments -->
+    <dependency>
+      <groupId>org.jboss.shrinkwrap.resolver</groupId>
+      <artifactId>shrinkwrap-resolver-impl-maven</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.jboss.shrinkwrap.resolver</groupId>
+      <artifactId>shrinkwrap-resolver-impl-maven-archive</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -81,6 +110,57 @@
         </configuration>
       </plugin>
 
+      <!-- Disable the parent's wildfly-maven-plugin; HA tests manage containers via Arquillian -->
+      <plugin>
+        <groupId>org.wildfly.plugins</groupId>
+        <artifactId>wildfly-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>start</id>
+            <phase>none</phase>
+          </execution>
+          <execution>
+            <id>deploy-coordinator</id>
+            <phase>none</phase>
+          </execution>
+          <execution>
+            <id>undeploy-coordinator</id>
+            <phase>none</phase>
+          </execution>
+          <execution>
+            <id>shutdown</id>
+            <phase>none</phase>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Create separate server base directories for HA cluster nodes -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>prepare-ha-nodes</id>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <phase>pre-integration-test</phase>
+            <configuration>
+              <target>
+                <copy todir="${project.build.directory}/wildfly-node1/configuration">
+                  <fileset dir="${wildfly.home}/standalone/configuration"></fileset>
+                </copy>
+                <mkdir dir="${project.build.directory}/wildfly-node1/deployments"></mkdir>
+                <copy todir="${project.build.directory}/wildfly-node2/configuration">
+                  <fileset dir="${wildfly.home}/standalone/configuration"></fileset>
+                </copy>
+                <mkdir dir="${project.build.directory}/wildfly-node2/deployments"></mkdir>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-failsafe-plugin</artifactId>
@@ -91,16 +171,78 @@
               <goal>verify</goal>
             </goals>
             <configuration>
+              <!-- Override the root POM's skipITs=true so HA tests always run -->
+              <skipITs>false</skipITs>
               <systemPropertyVariables>
-                <arquillian.launch>wildfly-ha</arquillian.launch>
+                <arquillian.xml>arquillian-wildfly.xml</arquillian.xml>
                 <wildfly.home>${wildfly.home}</wildfly.home>
                 <lra.coordinator.ha.enabled>true</lra.coordinator.ha.enabled>
+                <project.version>${project.version}</project.version>
+                <project.build.directory>${project.build.directory}</project.build.directory>
+                <version.microprofile.lra>${version.microprofile.lra}</version.microprofile.lra>
               </systemPropertyVariables>
+              <!-- Test selection controlled by ha.test.includes property -->
+              <!-- Default: HAClusteringIT only. Profiles override for other suites. -->
+              <includes>
+                <include>${ha.test.includes}</include>
+              </includes>
+              <forkedProcessTimeoutInSeconds>${ha.test.timeout}</forkedProcessTimeoutInSeconds>
             </configuration>
           </execution>
         </executions>
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!-- Kept for backward compatibility; the main build section now handles
+         wildfly-maven-plugin disabling and skipITs override -->
+    <profile>
+      <id>arq</id>
+    </profile>
+
+    <!-- Profile for running multi-node cluster tests (requires WildFly) -->
+    <profile>
+      <id>ha-cluster-tests</id>
+      <properties>
+        <ha.test.includes>**/MultiNodeClusterIT.java</ha.test.includes>
+      </properties>
+    </profile>
+
+    <!-- Profile for running failure scenario tests (requires WildFly) -->
+    <profile>
+      <id>ha-failure-tests</id>
+      <properties>
+        <ha.test.includes>**/FailureScenarioIT.java</ha.test.includes>
+        <ha.test.timeout>600</ha.test.timeout>
+      </properties>
+    </profile>
+
+    <!-- Profile for running data consistency tests (requires WildFly) -->
+    <profile>
+      <id>ha-consistency-tests</id>
+      <properties>
+        <ha.test.includes>**/DataConsistencyIT.java</ha.test.includes>
+      </properties>
+    </profile>
+
+    <!-- Profile for running performance tests (requires WildFly) -->
+    <profile>
+      <id>ha-performance-tests</id>
+      <properties>
+        <ha.test.includes>**/PerformanceIT.java</ha.test.includes>
+        <ha.test.timeout>900</ha.test.timeout>
+      </properties>
+    </profile>
+
+    <!-- Profile for running ALL HA tests (comprehensive suite, requires WildFly) -->
+    <profile>
+      <id>ha-full-suite</id>
+      <properties>
+        <ha.test.includes>**/*IT.java</ha.test.includes>
+        <ha.test.timeout>1200</ha.test.timeout>
+      </properties>
+    </profile>
+  </profiles>
 
 </project>

@@ -9,14 +9,17 @@
         http://jboss.org/schema/arquillian
         http://jboss.org/schema/arquillian/arquillian_1_0.xsd">
 
+    <!-- Container group for HA testing -->
+    <group qualifier="wildfly-ha" default="true">
     <!-- First WildFly instance (Node 1) -->
-    <container qualifier="wildfly-ha-node1" mode="manual">
+    <container qualifier="wildfly-ha-node1" mode="manual" default="true">
         <configuration>
             <property name="jbossHome">${wildfly.home}</property>
             <property name="serverConfig">standalone-ha.xml</property>
             <property name="javaVmArguments">
                 -Djboss.node.name=node1
                 -Djboss.socket.binding.port-offset=0
+                -Djboss.server.base.dir=${project.build.directory}/wildfly-node1
                 -Dlra.coordinator.ha.enabled=true
                 -Dlra.coordinator.node.id=node1
                 -Djava.net.preferIPv4Stack=true
@@ -36,6 +39,7 @@
             <property name="javaVmArguments">
                 -Djboss.node.name=node2
                 -Djboss.socket.binding.port-offset=100
+                -Djboss.server.base.dir=${project.build.directory}/wildfly-node2
                 -Dlra.coordinator.ha.enabled=true
                 -Dlra.coordinator.node.id=node2
                 -Djava.net.preferIPv4Stack=true
@@ -46,5 +50,8 @@
             <property name="startupTimeoutInSeconds">120</property>
         </configuration>
     </container>
+    </group>
+
+
 
 </arquillian>

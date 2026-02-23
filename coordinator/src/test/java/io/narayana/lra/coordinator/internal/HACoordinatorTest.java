@@ -128,25 +128,25 @@ class HACoordinatorTest {
      */
     private InfinispanStore createInfinispanStore(EmbeddedCacheManager cacheManager) {
         InfinispanStore store = new InfinispanStore() {
-            private final Cache<URI, LRAState> activeCache = cacheManager
+            private final Cache<String, LRAState> activeCache = cacheManager
                     .getCache(InfinispanConfiguration.ACTIVE_LRA_CACHE_NAME);
-            private final Cache<URI, LRAState> recoveringCache = cacheManager
+            private final Cache<String, LRAState> recoveringCache = cacheManager
                     .getCache(InfinispanConfiguration.RECOVERING_LRA_CACHE_NAME);
-            private final Cache<URI, LRAState> failedCache = cacheManager
+            private final Cache<String, LRAState> failedCache = cacheManager
                     .getCache(InfinispanConfiguration.FAILED_LRA_CACHE_NAME);
 
             @Override
-            public Cache<URI, LRAState> getActiveLRACache() {
+            public Cache<String, LRAState> getActiveLRACache() {
                 return activeCache;
             }
 
             @Override
-            public Cache<URI, LRAState> getRecoveringLRACache() {
+            public Cache<String, LRAState> getRecoveringLRACache() {
                 return recoveringCache;
             }
 
             @Override
-            public Cache<URI, LRAState> getFailedLRACache() {
+            public Cache<String, LRAState> getFailedLRACache() {
                 return failedCache;
             }
         };

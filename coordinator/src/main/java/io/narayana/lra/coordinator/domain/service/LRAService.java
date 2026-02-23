@@ -18,6 +18,7 @@ import com.arjuna.ats.arjuna.recovery.RecoveryManager;
 import io.narayana.lra.LRAConstants;
 import io.narayana.lra.LRAData;
 import io.narayana.lra.coordinator.domain.model.LRAParticipantRecord;
+import io.narayana.lra.coordinator.domain.model.LRAState;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
 import io.narayana.lra.coordinator.internal.LRARecoveryModule;
@@ -30,6 +31,8 @@ import jakarta.ws.rs.core.Response;
 import java.io.UnsupportedEncodingException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -309,16 +312,90 @@ public class LRAService {
     }
 
     public List<LRAData> getAll(LRAStatus lraStatus) {
+        // Collect local LRAs
+        Map<URI, LRAData> result = new LinkedHashMap<>();
+
         if (lraStatus == null) {
-            List<LRAData> all = lras.values().stream()
-                    .map(LongRunningAction::getLRAData).collect(toList());
-            all.addAll(getAllRecovering());
-            return all;
+            lras.values().stream()
+                    .map(LongRunningAction::getLRAData)
+                    .forEach(d -> result.put(d.getLraId(), d));
+            recoveringLRAs.values().stream()
+                    .map(LongRunningAction::getLRAData)
+                    .forEach(d -> result.put(d.getLraId(), d));
+        } else {
+            getDataByStatus(lras, lraStatus)
+                    .forEach(d -> result.put(d.getLraId(), d));
+            getDataByStatus(recoveringLRAs, lraStatus)
+                    .forEach(d -> result.put(d.getLraId(), d));
         }
 
-        List<LRAData> allByStatus = getDataByStatus(lras, lraStatus);
-        allByStatus.addAll(getDataByStatus(recoveringLRAs, lraStatus));
-        return allByStatus;
+        // In HA mode, also include LRAs from the distributed store
+        // that are not yet loaded into local memory
+        if (haEnabled && lraStore != null && lraStore.isAvailable()) {
+            mergeDistributedLRAs(result, lraStatus);
+        }
+
+        return new ArrayList<>(result.values());
+    }
+
+    /**
+     * Merges LRAs from the distributed Infinispan cache into the result map.
+     * Only adds entries that are not already present (local state takes precedence).
+     */
+    private void mergeDistributedLRAs(Map<URI, LRAData> result, LRAStatus statusFilter) {
+        try {
+            // Active LRAs
+            if (statusFilter == null || statusFilter == LRAStatus.Active) {
+                for (Map.Entry<String, LRAState> entry : lraStore.getAllActiveLRAs().entrySet()) {
+                    LRAState state = entry.getValue();
+                    result.putIfAbsent(state.getId(), toLRAData(state));
+                }
+            }
+
+            // Recovering LRAs (Closing, Cancelling, Closed, Cancelled)
+            if (statusFilter == null || statusFilter == LRAStatus.Closing
+                    || statusFilter == LRAStatus.Cancelling
+                    || statusFilter == LRAStatus.Closed
+                    || statusFilter == LRAStatus.Cancelled) {
+                for (LRAState state : lraStore.getAllRecoveringLRAs()) {
+                    if (statusFilter == null || state.getStatus() == statusFilter) {
+                        result.putIfAbsent(state.getId(), toLRAData(state));
+                    }
+                }
+            }
+
+            // Failed LRAs
+            if (statusFilter == null || statusFilter == LRAStatus.FailedToClose
+                    || statusFilter == LRAStatus.FailedToCancel) {
+                for (LRAState state : lraStore.getAllFailedLRAs()) {
+                    if (statusFilter == null || state.getStatus() == statusFilter) {
+                        result.putIfAbsent(state.getId(), toLRAData(state));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Error merging LRAs from distributed store");
+        }
+    }
+
+    /**
+     * Converts an LRAState from the distributed store into an LRAData DTO.
+     */
+    private LRAData toLRAData(LRAState state) {
+        return new LRAData(
+                state.getId(),
+                state.getClientId(),
+                state.getStatus(),
+                state.getParentId() == null, // isTopLevel
+                state.isRecovering(),
+                state.getStartTime() != null
+                        ? state.getStartTime().atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+                        : 0L,
+                state.getFinishTime() != null
+                        ? state.getFinishTime().atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+                        : 0L,
+                0 // httpStatus is not tracked in LRAState
+        );
     }
 
     /**
@@ -676,11 +753,27 @@ public class LRAService {
     }
 
     public List<LRAData> getFailedLRAs() {
-        Map<URI, LongRunningAction> failedLRAs = new ConcurrentHashMap<>();
+        Map<URI, LRAData> result = new LinkedHashMap<>();
 
-        getRM().getFailedLRAs(failedLRAs);
+        // Local failed LRAs from ObjectStore
+        Map<URI, LongRunningAction> localFailed = new ConcurrentHashMap<>();
+        getRM().getFailedLRAs(localFailed);
+        localFailed.values().stream()
+                .map(LongRunningAction::getLRAData)
+                .forEach(d -> result.put(d.getLraId(), d));
 
-        return failedLRAs.values().stream().map(LongRunningAction::getLRAData).collect(toList());
+        // In HA mode, also include failed LRAs from the distributed store
+        if (haEnabled && lraStore != null && lraStore.isAvailable()) {
+            try {
+                for (LRAState state : lraStore.getAllFailedLRAs()) {
+                    result.putIfAbsent(state.getId(), toLRAData(state));
+                }
+            } catch (Exception e) {
+                LRALogger.logger.warnf(e, "Error getting failed LRAs from distributed store");
+            }
+        }
+
+        return new ArrayList<>(result.values());
     }
 
     private LRARecoveryModule getRM() {

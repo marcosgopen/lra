@@ -36,36 +36,38 @@ public class InfinispanStore implements LRAStore {
 
     @Inject
     @Named("activeLRACache")
-    private Cache<URI, LRAState> activeLRACache;
+    private Cache<String, LRAState> activeLRACache;
 
     @Inject
     @Named("recoveringLRACache")
-    private Cache<URI, LRAState> recoveringLRACache;
+    private Cache<String, LRAState> recoveringLRACache;
 
     @Inject
     @Named("failedLRACache")
-    private Cache<URI, LRAState> failedLRACache;
+    private Cache<String, LRAState> failedLRACache;
 
-    private boolean haEnabled = false;
+    private volatile Boolean haEnabled = null;
 
     /**
      * Initializes the store and checks if HA mode is enabled.
+     * Can be called explicitly or triggered lazily via {@link #isHaEnabled()}.
      */
     public void initialize() {
         String haEnabledProp = System.getProperty("lra.coordinator.ha.enabled", "false");
-        this.haEnabled = "true".equalsIgnoreCase(haEnabledProp);
+        boolean enabled = "true".equalsIgnoreCase(haEnabledProp);
 
-        if (haEnabled) {
-            // Use getters instead of fields for testability
+        if (enabled) {
             if (getActiveLRACache() == null || getRecoveringLRACache() == null || getFailedLRACache() == null) {
                 LRALogger.logger.warn("HA mode enabled but Infinispan caches not available, disabling HA");
-                this.haEnabled = false;
+                enabled = false;
             } else {
                 LRALogger.logger.info("InfinispanStore initialized in HA mode");
             }
         } else {
             LRALogger.logger.debug("InfinispanStore initialized in single-instance mode");
         }
+
+        this.haEnabled = enabled;
     }
 
     /**
@@ -80,8 +82,8 @@ public class InfinispanStore implements LRAStore {
         }
 
         try {
-            Cache<URI, LRAState> cache = getCacheForState(state);
-            cache.put(lraId, state);
+            Cache<String, LRAState> cache = getCacheForState(state);
+            cache.put(lraId.toString(), state);
 
             if (LRALogger.logger.isTraceEnabled()) {
                 LRALogger.logger.tracef("Saved LRA %s to Infinispan cache (status: %s)",
@@ -105,20 +107,22 @@ public class InfinispanStore implements LRAStore {
         }
 
         try {
+            String key = lraId.toString();
+
             // Try active cache first
-            LRAState state = getActiveLRACache().get(lraId);
+            LRAState state = getActiveLRACache().get(key);
             if (state != null) {
                 return state;
             }
 
             // Try recovering cache
-            state = getRecoveringLRACache().get(lraId);
+            state = getRecoveringLRACache().get(key);
             if (state != null) {
                 return state;
             }
 
             // Try failed cache
-            state = getFailedLRACache().get(lraId);
+            state = getFailedLRACache().get(key);
             return state;
 
         } catch (Exception e) {
@@ -138,9 +142,10 @@ public class InfinispanStore implements LRAStore {
         }
 
         try {
-            getActiveLRACache().remove(lraId);
-            getRecoveringLRACache().remove(lraId);
-            getFailedLRACache().remove(lraId);
+            String key = lraId.toString();
+            getActiveLRACache().remove(key);
+            getRecoveringLRACache().remove(key);
+            getFailedLRACache().remove(key);
 
             if (LRALogger.logger.isTraceEnabled()) {
                 LRALogger.logger.tracef("Removed LRA %s from Infinispan", lraId);
@@ -163,11 +168,13 @@ public class InfinispanStore implements LRAStore {
         }
 
         try {
+            String key = lraId.toString();
+
             // Remove from active cache
-            getActiveLRACache().remove(lraId);
+            getActiveLRACache().remove(key);
 
             // Add to recovering cache
-            getRecoveringLRACache().put(lraId, state);
+            getRecoveringLRACache().put(key, state);
 
             if (LRALogger.logger.isTraceEnabled()) {
                 LRALogger.logger.tracef("Moved LRA %s to recovering cache", lraId);
@@ -189,6 +196,8 @@ public class InfinispanStore implements LRAStore {
         }
 
         try {
+            String key = lraId.toString();
+
             // Load current state
             LRAState state = loadLRA(lraId);
             if (state == null) {
@@ -197,11 +206,11 @@ public class InfinispanStore implements LRAStore {
             }
 
             // Remove from active and recovering caches
-            getActiveLRACache().remove(lraId);
-            getRecoveringLRACache().remove(lraId);
+            getActiveLRACache().remove(key);
+            getRecoveringLRACache().remove(key);
 
             // Add to failed cache
-            getFailedLRACache().put(lraId, state);
+            getFailedLRACache().put(key, state);
 
             if (LRALogger.logger.isTraceEnabled()) {
                 LRALogger.logger.tracef("Moved LRA %s to failed cache", lraId);
@@ -217,6 +226,9 @@ public class InfinispanStore implements LRAStore {
      * @return true if HA is enabled
      */
     public boolean isHaEnabled() {
+        if (haEnabled == null) {
+            initialize();
+        }
         return haEnabled;
     }
 
@@ -277,7 +289,7 @@ public class InfinispanStore implements LRAStore {
      * @param state the LRA state
      * @return the cache to use
      */
-    private Cache<URI, LRAState> getCacheForState(LRAState state) {
+    private Cache<String, LRAState> getCacheForState(LRAState state) {
         switch (state.getStatus()) {
             case Active:
                 return getActiveLRACache();
@@ -302,7 +314,7 @@ public class InfinispanStore implements LRAStore {
      *
      * @return the active LRA cache
      */
-    public Cache<URI, LRAState> getActiveLRACache() {
+    public Cache<String, LRAState> getActiveLRACache() {
         return activeLRACache;
     }
 
@@ -311,7 +323,7 @@ public class InfinispanStore implements LRAStore {
      *
      * @return the recovering LRA cache
      */
-    public Cache<URI, LRAState> getRecoveringLRACache() {
+    public Cache<String, LRAState> getRecoveringLRACache() {
         return recoveringLRACache;
     }
 
@@ -320,12 +332,12 @@ public class InfinispanStore implements LRAStore {
      *
      * @return the failed LRA cache
      */
-    public Cache<URI, LRAState> getFailedLRACache() {
+    public Cache<String, LRAState> getFailedLRACache() {
         return failedLRACache;
     }
 
     @Override
-    public Map<URI, LRAState> getAllActiveLRAs() {
+    public Map<String, LRAState> getAllActiveLRAs() {
         if (!haEnabled || getActiveLRACache() == null) {
             return Collections.emptyMap();
         }

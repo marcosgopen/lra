@@ -102,7 +102,7 @@ public interface LRAStore {
      *
      * @return map of active LRA IDs to their states, empty map if none exist or HA is disabled
      */
-    Map<URI, LRAState> getAllActiveLRAs();
+    Map<String, LRAState> getAllActiveLRAs();
 
     /**
      * Retrieves all recovering LRAs as a collection.

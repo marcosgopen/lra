@@ -13,7 +13,6 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Named;
-import java.net.URI;
 import org.infinispan.Cache;
 import org.infinispan.configuration.cache.CacheMode;
 import org.infinispan.configuration.cache.ConfigurationBuilder;
@@ -64,11 +63,43 @@ public class InfinispanConfiguration {
 
             // Build global configuration
             GlobalConfigurationBuilder globalConfig = new GlobalConfigurationBuilder();
+
+            // Configure JGroups transport for clustering
+            String jgroupsConfig = System.getProperty("lra.coordinator.jgroups.config");
+            if (jgroupsConfig != null && !jgroupsConfig.isEmpty()) {
+                // Use explicit JGroups configuration file
+                globalConfig
+                        .transport()
+                        .defaultTransport()
+                        .clusterName(clusterName)
+                        .nodeName(getNodeName())
+                        .addProperty("configurationFile", jgroupsConfig);
+            } else {
+                // Use default JGroups UDP stack with explicit bind address
+                globalConfig
+                        .transport()
+                        .defaultTransport()
+                        .clusterName(clusterName)
+                        .nodeName(getNodeName());
+            }
+
+            // Set JGroups bind address if specified (ensures the embedded transport
+            // binds to the right interface, separate from WildFly's own JGroups)
+            String bindAddr = System.getProperty("lra.coordinator.jgroups.bind_addr",
+                    System.getProperty("jgroups.bind_addr", "127.0.0.1"));
+            System.setProperty("jgroups.bind_addr", bindAddr);
+
+            // Use Java serialization so LRAState (which implements Serializable)
+            // can be replicated between nodes without ProtoStream schemas
             globalConfig
-                    .transport()
-                    .defaultTransport()
-                    .clusterName(clusterName)
-                    .nodeName(getNodeName());
+                    .serialization()
+                    .marshaller(new org.infinispan.commons.marshall.JavaSerializationMarshaller())
+                    .allowList()
+                    .addRegexp("io\\.narayana\\.lra\\..*")
+                    .addRegexp("java\\.net\\..*")
+                    .addRegexp("java\\.time\\..*")
+                    .addRegexp("java\\.util\\..*")
+                    .addRegexp("org\\.eclipse\\.microprofile\\.lra\\..*");
 
             globalConfig
                     .globalState()
@@ -80,6 +111,9 @@ public class InfinispanConfiguration {
                     .statistics(true);
 
             cacheManager = new DefaultCacheManager(globalConfig.build());
+
+            LRALogger.logger.infof("Infinispan cluster members: %s",
+                    cacheManager.getMembers());
 
             // Get cache mode from configuration (default: REPL_SYNC)
             CacheMode cacheMode = getCacheMode();
@@ -161,7 +195,7 @@ public class InfinispanConfiguration {
     @Produces
     @ApplicationScoped
     @Named("activeLRACache")
-    public Cache<URI, LRAState> activeLRACache() {
+    public Cache<String, LRAState> activeLRACache() {
         if (!initialized) {
             initialize();
         }
@@ -176,7 +210,7 @@ public class InfinispanConfiguration {
     @Produces
     @ApplicationScoped
     @Named("recoveringLRACache")
-    public Cache<URI, LRAState> recoveringLRACache() {
+    public Cache<String, LRAState> recoveringLRACache() {
         if (!initialized) {
             initialize();
         }
@@ -191,7 +225,7 @@ public class InfinispanConfiguration {
     @Produces
     @ApplicationScoped
     @Named("failedLRACache")
-    public Cache<URI, LRAState> failedLRACache() {
+    public Cache<String, LRAState> failedLRACache() {
         if (!initialized) {
             initialize();
         }
@@ -263,13 +297,15 @@ public class InfinispanConfiguration {
 
     /**
      * Gets the persistent location for Infinispan state.
+     * Each node uses a separate directory to avoid file locking conflicts
+     * when multiple coordinators run on the same host.
      *
      * @return the persistent location
      */
     private String getPersistentLocation() {
         String location = System.getProperty("lra.coordinator.infinispan.persistent.location");
         if (location == null || location.isEmpty()) {
-            location = System.getProperty("java.io.tmpdir") + "/lra-infinispan";
+            location = System.getProperty("java.io.tmpdir") + "/lra-infinispan-" + getNodeName();
         }
         return location;
     }

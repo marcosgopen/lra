@@ -312,7 +312,7 @@ public class LRARecoveryModule implements RecoveryModule,
 
         try {
             // Get all active LRAs
-            Map<URI, io.narayana.lra.coordinator.domain.model.LRAState> activeLRAs = lraStore.getAllActiveLRAs();
+            Map<String, io.narayana.lra.coordinator.domain.model.LRAState> activeLRAs = lraStore.getAllActiveLRAs();
 
             if (activeLRAs == null || activeLRAs.isEmpty()) {
                 if (LRALogger.logger.isTraceEnabled()) {
@@ -326,8 +326,8 @@ public class LRARecoveryModule implements RecoveryModule,
             int lockedCount = 0;
 
             // Scan all active LRAs for timeouts
-            for (java.util.Map.Entry<URI, io.narayana.lra.coordinator.domain.model.LRAState> entry : activeLRAs.entrySet()) {
-                URI lraId = entry.getKey();
+            for (java.util.Map.Entry<String, io.narayana.lra.coordinator.domain.model.LRAState> entry : activeLRAs.entrySet()) {
+                URI lraId = URI.create(entry.getKey());
                 io.narayana.lra.coordinator.domain.model.LRAState state = entry.getValue();
 
                 // Check if LRA has a timeout and it has expired

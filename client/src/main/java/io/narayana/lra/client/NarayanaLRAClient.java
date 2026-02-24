@@ -465,7 +465,13 @@ public class NarayanaLRAClient implements Closeable {
                 // Handle connection exceptions, async timeout, and execution failures
                 Throwable t = e.getCause();
 
-                if (supportsFailover && i == coordinatorCount - 1) {
+                if (!supportsFailover) {
+                    String errMsg = LRALogger.i18nLogger.warn_startLRAFailed(e.getMessage());
+                    LRALogger.logger.warn("Start LRA failed and failover is not enabled: " + e.getMessage());
+                    LRALogger.logger.warn(errMsg, e);
+                    throw new WebApplicationException(Response.status(SERVICE_UNAVAILABLE).entity(errMsg).build());
+                }
+                if (i == coordinatorCount - 1) {
 
                     String errMsg = "";
                     if (t instanceof ServiceUnavailableException) {

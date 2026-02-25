@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.narayana.lra.client.NarayanaLRAClient;
 import java.net.URI;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import org.jboss.arquillian.container.test.api.ContainerController;
 import org.jboss.arquillian.container.test.api.Deployment;
@@ -32,6 +33,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
  * - Network partition handling
  * - Partition healing and reconciliation
  * - Recovery after failures
+ *
+ * Uses a 3-node cluster (odd number) to ensure proper quorum-based
+ * partition handling with DENY_READ_WRITES strategy.
  *
  * Note: These tests require manual execution with full WildFly cluster.
  * They are designed to verify the resilience of the HA coordinator.
@@ -58,6 +62,12 @@ public class FailureScenarioIT {
         return createLRACoordinatorDeployment();
     }
 
+    @Deployment(name = "node3", testable = false)
+    @TargetsContainer(NODE3_CONTAINER)
+    public static WebArchive createDeploymentNode3() {
+        return createLRACoordinatorDeployment();
+    }
+
     @BeforeEach
     void setUp() {
         // Clients are created per-test after nodes are started and ready
@@ -75,16 +85,19 @@ public class FailureScenarioIT {
         // Best-effort cleanup: stop containers (ignores errors if already stopped)
         stopNodeQuietly(controller, NODE1_CONTAINER);
         stopNodeQuietly(controller, NODE2_CONTAINER);
+        stopNodeQuietly(controller, NODE3_CONTAINER);
     }
 
     /**
-     * Starts both nodes and creates LRA clients for them.
+     * Starts all three nodes and creates LRA clients for node1 and node2.
      */
     private void startCluster() {
         startNode(controller, NODE1_CONTAINER);
         startNode(controller, NODE2_CONTAINER);
+        startNode(controller, NODE3_CONTAINER);
         waitForNodeReady(NODE1_BASE_URL);
         waitForNodeReady(NODE2_BASE_URL);
+        waitForNodeReady(NODE3_BASE_URL);
         node1Client = createLRAClient(NODE1_BASE_URL);
         node2Client = createLRAClient(NODE2_BASE_URL);
     }
@@ -105,12 +118,12 @@ public class FailureScenarioIT {
 
     @Test
     void testNodeCrashDuringLRALifecycle() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         startCluster();
         waitForClusterFormation();
 
         // When: Create LRA on node1
-        URI lraId = node1Client.startLRA("ha-test");
+        URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         assertNotNull(lraId, "LRA should be created successfully");
 
         // Allow replication
@@ -135,7 +148,7 @@ public class FailureScenarioIT {
 
     @Test
     void testRecoveryAfterBothNodesRestart() throws Exception {
-        // Given: Two-node cluster with disk-backed persistence
+        // Given: Three-node cluster with disk-backed persistence
         startCluster();
         waitForClusterFormation();
 
@@ -178,13 +191,13 @@ public class FailureScenarioIT {
 
     @Test
     void testCoordinatorFailover() throws Exception {
-        // Given: Two-node cluster where one is the cluster coordinator
+        // Given: Three-node cluster where one is the cluster coordinator
         startCluster();
         waitForClusterFormation(15);
 
         // When: Create LRAs on both nodes
-        URI lra1 = node1Client.startLRA("ha-test");
-        URI lra2 = node2Client.startLRA("ha-test");
+        URI lra1 = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
+        URI lra2 = node2Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         waitForReplication();
 
         // When: Kill node1 (assume it was the cluster coordinator)
@@ -197,7 +210,7 @@ public class FailureScenarioIT {
                 "Node2 should continue serving requests");
 
         // And: Should be able to create new LRAs on node2
-        URI lra3 = node2Client.startLRA("ha-test");
+        URI lra3 = node2Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         assertNotNull(lra3, "Should be able to create new LRA after failover");
 
         // Cleanup
@@ -206,34 +219,28 @@ public class FailureScenarioIT {
 
     @Test
     void testSplitBrainPrevention() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         startCluster();
         waitForClusterFormation();
 
         // When: Create LRA
-        URI lraId = node1Client.startLRA("ha-test");
+        URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         waitForReplication();
 
         // When: Simulate network partition by killing one node
-        // In a real 2-node cluster, this creates a split where each node is alone
+        // With 3 nodes, killing 1 leaves a majority (2 of 3)
         killNode(controller, NODE2_CONTAINER);
         waitForReplication(3);
 
-        // Then: With DENY_READ_WRITES strategy, the minority (or 50/50 split)
-        // should deny operations to prevent split-brain
-        // Node1 should continue to work as it has the LRA's home node
-
-        // The LRA should still be accessible from its home node (node1)
+        // Then: With DENY_READ_WRITES strategy, the majority partition
+        // should continue to operate normally
         assertTrue(isLRAAccessible(node1Client, lraId),
                 "LRA should still be accessible from its home node");
-
-        // Note: In a true network partition test, you'd need network manipulation
-        // tools (iptables, toxiproxy, etc.) which are beyond container controller
     }
 
     @Test
     void testGracefulShutdownPreservesState() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         startCluster();
         waitForClusterFormation();
 
@@ -263,13 +270,13 @@ public class FailureScenarioIT {
 
     @Test
     void testConcurrentNodeFailures() throws Exception {
-        // Given: Two-node cluster with LRAs
+        // Given: Three-node cluster with LRAs
         startCluster();
         waitForClusterFormation();
 
         // When: Create LRAs on both nodes
-        URI lra1 = node1Client.startLRA("ha-test");
-        URI lra2 = node2Client.startLRA("ha-test");
+        URI lra1 = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
+        URI lra2 = node2Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         waitForReplication();
 
         // When: Both nodes fail (worst case - total cluster failure)
@@ -287,12 +294,8 @@ public class FailureScenarioIT {
         recreateClients();
         waitForClusterFormation(15);
 
-        // Then: Recovery should rebuild state from ObjectStore
-        // The LRAs may or may not be immediately accessible depending on
-        // whether recovery has completed, but the system should be operational
-
-        // Should be able to create new LRAs
-        URI lra3 = node1Client.startLRA("ha-test");
+        // Then: Should be able to create new LRAs
+        URI lra3 = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         assertNotNull(lra3, "Should be able to create new LRA after cluster restart");
 
         // Cleanup
@@ -301,12 +304,12 @@ public class FailureScenarioIT {
 
     @Test
     void testNodeRejoinAfterCrash() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         startCluster();
         waitForClusterFormation();
 
         // When: Create LRA
-        URI lraId = node1Client.startLRA("ha-test");
+        URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         waitForReplication();
 
         // When: Node2 crashes
@@ -328,13 +331,9 @@ public class FailureScenarioIT {
         waitForClusterFormation(10);
 
         // Then: Node2 should sync state from node1
-        // New LRAs created while it was down should be accessible
         for (URI newLraId : newLraIds) {
-            // Give time for state transfer
             waitForReplication(2);
-
             boolean accessible = isLRAReplicatedToNode(newLraId, NODE2_BASE_URL);
-            // State may take time to sync, so we just verify the cluster is functional
             System.out.println("LRA " + newLraId + " accessible from node2: " + accessible);
         }
 

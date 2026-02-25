@@ -155,6 +155,10 @@
                   <fileset dir="${wildfly.home}/standalone/configuration"></fileset>
                 </copy>
                 <mkdir dir="${project.build.directory}/wildfly-node2/deployments"></mkdir>
+                <copy todir="${project.build.directory}/wildfly-node3/configuration">
+                  <fileset dir="${wildfly.home}/standalone/configuration"></fileset>
+                </copy>
+                <mkdir dir="${project.build.directory}/wildfly-node3/deployments"></mkdir>
               </target>
             </configuration>
           </execution>

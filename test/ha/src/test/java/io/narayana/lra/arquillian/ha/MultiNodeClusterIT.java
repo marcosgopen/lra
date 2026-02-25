@@ -10,7 +10,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.narayana.lra.client.NarayanaLRAClient;
 import java.net.URI;
+import java.time.temporal.ChronoUnit;
 import org.jboss.arquillian.container.test.api.ContainerController;
+import org.jboss.arquillian.container.test.api.Deployer;
 import org.jboss.arquillian.container.test.api.Deployment;
 import org.jboss.arquillian.container.test.api.RunAsClient;
 import org.jboss.arquillian.container.test.api.TargetsContainer;
@@ -26,8 +28,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 /**
  * Multi-node cluster integration tests for LRA High Availability.
  *
- * The cluster is started once for the whole class and reused across tests.
- * This avoids Infinispan partition instability from repeated container restarts.
+ * Uses a 3-node cluster (odd number) to ensure proper quorum-based
+ * partition handling. With DENY_READ_WRITES strategy, a majority of
+ * nodes must be reachable for operations to succeed.
+ *
+ * Uses managed=false deployments so Arquillian doesn't auto-undeploy the WAR
+ * between tests. The cluster starts once and stays up for all tests.
  */
 @ExtendWith(ArquillianExtension.class)
 @RunAsClient
@@ -37,19 +43,28 @@ public class MultiNodeClusterIT {
     @ArquillianResource
     private ContainerController controller;
 
+    @ArquillianResource
+    private Deployer deployer;
+
     private NarayanaLRAClient node1Client;
     private NarayanaLRAClient node2Client;
     private boolean clusterStarted = false;
 
-    @Deployment(name = "node1", testable = false)
+    @Deployment(name = "node1", managed = false, testable = false)
     @TargetsContainer(NODE1_CONTAINER)
     public static WebArchive createDeploymentNode1() {
         return createLRACoordinatorDeployment();
     }
 
-    @Deployment(name = "node2", testable = false)
+    @Deployment(name = "node2", managed = false, testable = false)
     @TargetsContainer(NODE2_CONTAINER)
     public static WebArchive createDeploymentNode2() {
+        return createLRACoordinatorDeployment();
+    }
+
+    @Deployment(name = "node3", managed = false, testable = false)
+    @TargetsContainer(NODE3_CONTAINER)
+    public static WebArchive createDeploymentNode3() {
         return createLRACoordinatorDeployment();
     }
 
@@ -58,8 +73,16 @@ public class MultiNodeClusterIT {
         if (!clusterStarted) {
             startNode(controller, NODE1_CONTAINER);
             startNode(controller, NODE2_CONTAINER);
+            startNode(controller, NODE3_CONTAINER);
+
+            // Manually deploy since managed=false
+            deployer.deploy("node1");
+            deployer.deploy("node2");
+            deployer.deploy("node3");
+
             waitForNodeReady(NODE1_BASE_URL);
             waitForNodeReady(NODE2_BASE_URL);
+            waitForNodeReady(NODE3_BASE_URL);
 
             node1Client = createLRAClient(NODE1_BASE_URL);
             node2Client = createLRAClient(NODE2_BASE_URL);
@@ -70,14 +93,13 @@ public class MultiNodeClusterIT {
     }
 
     @AfterEach
-    void cleanupLRAs() {
-        // Individual test cleanup is done inside each test method.
-        // Containers stay running across tests (PER_CLASS lifecycle).
+    void waitForClusterStability() {
+        waitForReplication();
     }
 
     @Test
     void testCreateLRAOnNode1AndRetrieveFromNode2() throws Exception {
-        URI lraId = node1Client.startLRA("ha-test");
+        URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         assertNotNull(lraId);
 
         waitForReplication();
@@ -90,7 +112,7 @@ public class MultiNodeClusterIT {
 
     @Test
     void testCreateLRAOnNode2AndRetrieveFromNode1() throws Exception {
-        URI lraId = node2Client.startLRA("ha-test");
+        URI lraId = node2Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         assertNotNull(lraId);
 
         waitForReplication();
@@ -125,23 +147,17 @@ public class MultiNodeClusterIT {
 
     @Test
     void testLRALifecycleAcrossNodes() throws Exception {
-        URI lraId = node1Client.startLRA("ha-test");
+        URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         waitForReplication();
 
         // Close from the other node
         node2Client.closeLRA(lraId);
-
-        waitForReplication();
-
-        // After closing, the LRA may or may not still be visible
-        boolean stillAccessible = isLRAAccessible(node1Client, lraId);
-        System.out.println("LRA accessible after cross-node close: " + stillAccessible);
     }
 
     @Test
     void testNodeIdEmbeddedInLRAIds() throws Exception {
-        URI lra1 = node1Client.startLRA("ha-test-node1");
-        URI lra2 = node2Client.startLRA("ha-test-node2");
+        URI lra1 = node1Client.startLRA(null, "ha-test-node1", 0L, ChronoUnit.SECONDS);
+        URI lra2 = node2Client.startLRA(null, "ha-test-node2", 0L, ChronoUnit.SECONDS);
 
         String[] segments1 = lra1.getPath().split("/");
         String[] segments2 = lra2.getPath().split("/");

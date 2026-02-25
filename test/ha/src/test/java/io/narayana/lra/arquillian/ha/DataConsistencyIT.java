@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.narayana.lra.client.NarayanaLRAClient;
 import java.net.URI;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -41,6 +42,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
  * - State recovery from ObjectStore
  * - No lost updates or conflicts
  *
+ * Uses a 3-node cluster (odd number) to ensure proper quorum-based
+ * partition handling with DENY_READ_WRITES strategy.
+ *
  * Note: These tests require manual execution with full WildFly cluster.
  */
 @ExtendWith(ArquillianExtension.class)
@@ -67,13 +71,22 @@ public class DataConsistencyIT {
         return createLRACoordinatorDeployment();
     }
 
+    @Deployment(name = "node3", testable = false)
+    @TargetsContainer(NODE3_CONTAINER)
+    public static WebArchive createDeploymentNode3() {
+        return createLRACoordinatorDeployment();
+    }
+
     @BeforeEach
     void setUp() {
         if (!clusterStarted) {
             startNode(controller, NODE1_CONTAINER);
             startNode(controller, NODE2_CONTAINER);
+            startNode(controller, NODE3_CONTAINER);
+
             waitForNodeReady(NODE1_BASE_URL);
             waitForNodeReady(NODE2_BASE_URL);
+            waitForNodeReady(NODE3_BASE_URL);
 
             node1Client = createLRAClient(NODE1_BASE_URL);
             node2Client = createLRAClient(NODE2_BASE_URL);
@@ -85,9 +98,9 @@ public class DataConsistencyIT {
 
     @Test
     void testStateReplicationConsistency() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         // When: Create LRA on node1
-        URI lraId = node1Client.startLRA("ha-test");
+        URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         assertNotNull(lraId);
 
         // Allow replication
@@ -107,7 +120,7 @@ public class DataConsistencyIT {
 
     @Test
     void testConcurrentLRACreationFromBothNodes() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         // When: Multiple threads create and close LRAs simultaneously from both nodes
         ExecutorService executor = Executors.newFixedThreadPool(10);
         CountDownLatch startLatch = new CountDownLatch(1);
@@ -122,7 +135,7 @@ public class DataConsistencyIT {
             futures.add(executor.submit(() -> {
                 try (NarayanaLRAClient threadClient = createLRAClient(NODE1_BASE_URL)) {
                     startLatch.await();
-                    URI lraId = threadClient.startLRA("ha-test");
+                    URI lraId = threadClient.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
                     synchronized (allLRAs) {
                         allLRAs.add(lraId);
                     }
@@ -138,7 +151,7 @@ public class DataConsistencyIT {
             futures.add(executor.submit(() -> {
                 try (NarayanaLRAClient threadClient = createLRAClient(NODE2_BASE_URL)) {
                     startLatch.await();
-                    URI lraId = threadClient.startLRA("ha-test");
+                    URI lraId = threadClient.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
                     synchronized (allLRAs) {
                         allLRAs.add(lraId);
                     }
@@ -184,7 +197,7 @@ public class DataConsistencyIT {
     @Test
     void testStateTransitionReplication() throws Exception {
         // Given: LRA in Active state
-        URI lraId = node1Client.startLRA("ha-test");
+        URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         waitForReplication();
 
         // Verify both nodes see it as Active
@@ -250,7 +263,7 @@ public class DataConsistencyIT {
         System.out.println("Recovered " + recoveredCount + " out of " + lraIds.size() + " LRAs");
 
         // Should be able to create new LRAs (system is operational)
-        URI newLra = node1Client.startLRA("ha-test");
+        URI newLra = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         assertNotNull(newLra, "Should be able to create new LRA after recovery");
 
         // Cleanup
@@ -274,7 +287,7 @@ public class DataConsistencyIT {
             for (int i = 0; i < 10; i++) {
                 futures.add(executor.submit(() -> {
                     try (NarayanaLRAClient threadClient = createLRAClient(NODE1_BASE_URL)) {
-                        URI lraId = threadClient.startLRA("ha-test");
+                        URI lraId = threadClient.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
                         synchronized (createdLRAs) {
                             createdLRAs.add(lraId);
                         }
@@ -289,7 +302,7 @@ public class DataConsistencyIT {
             for (int i = 0; i < 10; i++) {
                 futures.add(executor.submit(() -> {
                     try (NarayanaLRAClient threadClient = createLRAClient(NODE2_BASE_URL)) {
-                        URI lraId = threadClient.startLRA("ha-test");
+                        URI lraId = threadClient.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
                         synchronized (createdLRAs) {
                             createdLRAs.add(lraId);
                         }
@@ -335,9 +348,9 @@ public class DataConsistencyIT {
     @Test
     void testConsistentStateAfterPartialFailure() throws Exception {
         // Given: LRAs distributed across cluster
-        URI lra1 = node1Client.startLRA("ha-test");
-        URI lra2 = node2Client.startLRA("ha-test");
-        URI lra3 = node1Client.startLRA("ha-test");
+        URI lra1 = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
+        URI lra2 = node2Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
+        URI lra3 = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         waitForReplication();
 
         // Verify all are replicated
@@ -386,7 +399,7 @@ public class DataConsistencyIT {
         List<URI> lraIds = new ArrayList<>();
 
         for (int i = 0; i < lraCount; i++) {
-            URI lraId = node1Client.startLRA("ha-test");
+            URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
             lraIds.add(lraId);
 
             if (i % 10 == 0) {

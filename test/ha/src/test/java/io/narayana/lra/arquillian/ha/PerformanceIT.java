@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.narayana.lra.arquillian.ha.TestHelpers.Metrics;
 import io.narayana.lra.client.NarayanaLRAClient;
 import java.net.URI;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -43,6 +44,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
  * These tests verify that HA mode maintains acceptable performance
  * (target: <20% overhead vs single-node mode).
  *
+ * Uses a 3-node cluster (odd number) to ensure proper quorum-based
+ * partition handling with DENY_READ_WRITES strategy.
+ *
  * Note: These tests require manual execution with full WildFly cluster.
  */
 @ExtendWith(ArquillianExtension.class)
@@ -69,13 +73,22 @@ public class PerformanceIT {
         return createLRACoordinatorDeployment();
     }
 
+    @Deployment(name = "node3", testable = false)
+    @TargetsContainer(NODE3_CONTAINER)
+    public static WebArchive createDeploymentNode3() {
+        return createLRACoordinatorDeployment();
+    }
+
     @BeforeEach
     void setUp() {
         if (!clusterStarted) {
             startNode(controller, NODE1_CONTAINER);
             startNode(controller, NODE2_CONTAINER);
+            startNode(controller, NODE3_CONTAINER);
+
             waitForNodeReady(NODE1_BASE_URL);
             waitForNodeReady(NODE2_BASE_URL);
+            waitForNodeReady(NODE3_BASE_URL);
 
             node1Client = createLRAClient(NODE1_BASE_URL);
             node2Client = createLRAClient(NODE2_BASE_URL);
@@ -87,7 +100,7 @@ public class PerformanceIT {
 
     @Test
     void testHighThroughputLRACreation() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         // When: Create many LRAs rapidly
         int lraCount = 100; // Increase to 1000 for full stress test
         Metrics metrics = new Metrics();
@@ -96,7 +109,7 @@ public class PerformanceIT {
         metrics.start();
 
         for (int i = 0; i < lraCount; i++) {
-            URI lraId = node1Client.startLRA("ha-test");
+            URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
             lraIds.add(lraId);
             metrics.incrementOperations();
 
@@ -129,7 +142,7 @@ public class PerformanceIT {
 
     @Test
     void testConcurrentLoadAcrossCluster() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         int totalLRAs = 200;
         int threadCount = 20;
 
@@ -150,7 +163,7 @@ public class PerformanceIT {
 
                 futures.add(executor.submit(() -> {
                     try (NarayanaLRAClient threadClient = createLRAClient(nodeUrl)) {
-                        URI lraId = threadClient.startLRA("ha-test");
+                        URI lraId = threadClient.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
                         synchronized (createdLRAs) {
                             createdLRAs.add(lraId);
                         }
@@ -192,7 +205,7 @@ public class PerformanceIT {
 
     @Test
     void testReplicationLatency() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         // When: Create LRA on node1 and measure time to replicate to node2
         int samples = 20;
         List<Long> latencies = new ArrayList<>();
@@ -200,7 +213,7 @@ public class PerformanceIT {
         for (int i = 0; i < samples; i++) {
             // Create LRA
             long startTime = System.nanoTime();
-            URI lraId = node1Client.startLRA("ha-test");
+            URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
 
             // Poll node2 until LRA appears (or timeout)
             boolean replicated = false;
@@ -257,7 +270,7 @@ public class PerformanceIT {
 
     @Test
     void testMemoryScaling() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         // When: Create many LRAs to test memory usage
         // Architecture doc: ~5-10 KB per LRA in memory
         // Cache maxCount: 10,000 entries
@@ -269,7 +282,7 @@ public class PerformanceIT {
         System.out.println("Creating " + lraCount + " LRAs...");
 
         for (int i = 0; i < lraCount; i++) {
-            URI lraId = node1Client.startLRA("ha-test");
+            URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
             lraIds.add(lraId);
 
             if (i > 0 && i % 100 == 0) {
@@ -308,7 +321,7 @@ public class PerformanceIT {
 
     @Test
     void testLRALifecyclePerformance() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         // When: Measure full lifecycle (create -> close) performance
         int iterations = 50;
         Metrics createMetrics = new Metrics();
@@ -322,7 +335,7 @@ public class PerformanceIT {
         for (int i = 0; i < iterations; i++) {
             // Measure create (per-operation timing)
             createMetrics.startOp();
-            URI lraId = node1Client.startLRA("ha-test");
+            URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
             createMetrics.endOp();
 
             waitForReplication(1);
@@ -349,7 +362,7 @@ public class PerformanceIT {
 
     @Test
     void testClusterThroughputCapacity() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         // When: Maximum sustained throughput test
         int durationSeconds = 10;
         AtomicInteger opsCompleted = new AtomicInteger(0);
@@ -368,7 +381,7 @@ public class PerformanceIT {
             while (System.currentTimeMillis() < endTime) {
                 executor.submit(() -> {
                     try (NarayanaLRAClient threadClient = createLRAClient(NODE1_BASE_URL)) {
-                        URI lraId = threadClient.startLRA("ha-test");
+                        URI lraId = threadClient.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
                         synchronized (createdLRAs) {
                             createdLRAs.add(lraId);
                         }
@@ -380,7 +393,7 @@ public class PerformanceIT {
 
                 executor.submit(() -> {
                     try (NarayanaLRAClient threadClient = createLRAClient(NODE2_BASE_URL)) {
-                        URI lraId = threadClient.startLRA("ha-test");
+                        URI lraId = threadClient.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
                         synchronized (createdLRAs) {
                             createdLRAs.add(lraId);
                         }
@@ -421,7 +434,7 @@ public class PerformanceIT {
 
     @Test
     void testCrossNodeOperationLatency() throws Exception {
-        // Given: Two-node cluster
+        // Given: Three-node cluster
         // When: Measure latency of operations across nodes
         int iterations = 30;
         List<Long> sameNodeLatencies = new ArrayList<>();
@@ -432,14 +445,14 @@ public class PerformanceIT {
         for (int i = 0; i < iterations; i++) {
             // Same-node operation (create and close on node1)
             long startTime = System.nanoTime();
-            URI lra1 = node1Client.startLRA("ha-test");
+            URI lra1 = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
             node1Client.closeLRA(lra1);
             long sameNodeLatency = System.nanoTime() - startTime;
             sameNodeLatencies.add(TimeUnit.NANOSECONDS.toMillis(sameNodeLatency));
 
             // Cross-node operation (create on node1, close from node2)
             startTime = System.nanoTime();
-            URI lra2 = node1Client.startLRA("ha-test");
+            URI lra2 = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
             waitForReplication(1);
             node2Client.closeLRA(lra2);
             long crossNodeLatency = System.nanoTime() - startTime;

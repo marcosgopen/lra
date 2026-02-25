@@ -50,6 +50,26 @@
             <property name="startupTimeoutInSeconds">120</property>
         </configuration>
     </container>
+
+    <!-- Third WildFly instance (Node 3) -->
+    <container qualifier="wildfly-ha-node3" mode="manual">
+        <configuration>
+            <property name="jbossHome">${wildfly.home}</property>
+            <property name="serverConfig">standalone-ha.xml</property>
+            <property name="javaVmArguments">
+                -Djboss.node.name=node3
+                -Djboss.socket.binding.port-offset=200
+                -Djboss.server.base.dir=${project.build.directory}/wildfly-node3
+                -Dlra.coordinator.ha.enabled=true
+                -Dlra.coordinator.node.id=node3
+                -Djava.net.preferIPv4Stack=true
+                -Djgroups.bind_addr=127.0.0.1
+            </property>
+            <property name="managementAddress">127.0.0.1</property>
+            <property name="managementPort">10190</property>
+            <property name="startupTimeoutInSeconds">120</property>
+        </configuration>
+    </container>
     </group>
 
 

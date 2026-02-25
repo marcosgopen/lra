@@ -7,6 +7,7 @@ package io.narayana.lra.arquillian.ha;
 
 import io.narayana.lra.client.NarayanaLRAClient;
 import java.net.URI;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -30,8 +31,10 @@ public class TestHelpers {
 
     public static final String NODE1_CONTAINER = "wildfly-ha-node1";
     public static final String NODE2_CONTAINER = "wildfly-ha-node2";
+    public static final String NODE3_CONTAINER = "wildfly-ha-node3";
     public static final String NODE1_BASE_URL = "http://localhost:8080";
     public static final String NODE2_BASE_URL = "http://localhost:8180";
+    public static final String NODE3_BASE_URL = "http://localhost:8280";
     public static final String LRA_COORDINATOR_PATH = "/lra-coordinator/lra-coordinator";
 
     /**
@@ -119,7 +122,7 @@ public class TestHelpers {
     public static List<URI> startMultipleLRAs(NarayanaLRAClient lraClient, int count) {
         List<URI> lraIds = new ArrayList<>();
         for (int i = 0; i < count; i++) {
-            lraIds.add(lraClient.startLRA("ha-test-" + i));
+            lraIds.add(lraClient.startLRA(null, "ha-test-" + i, 0L, ChronoUnit.SECONDS));
         }
         return lraIds;
     }

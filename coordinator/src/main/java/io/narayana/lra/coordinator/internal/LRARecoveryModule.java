@@ -7,6 +7,7 @@ package io.narayana.lra.coordinator.internal;
 
 import com.arjuna.ats.arjuna.common.Uid;
 import com.arjuna.ats.arjuna.common.recoveryPropertyManager;
+import com.arjuna.ats.arjuna.coordinator.ActionStatus;
 import com.arjuna.ats.arjuna.exceptions.ObjectStoreException;
 import com.arjuna.ats.arjuna.objectstore.RecoveryStore;
 import com.arjuna.ats.arjuna.objectstore.StateStatus;
@@ -16,19 +17,32 @@ import com.arjuna.ats.arjuna.recovery.RecoveryModule;
 import com.arjuna.ats.arjuna.recovery.TransactionStatusConnectionManager;
 import com.arjuna.ats.arjuna.state.InputObjectState;
 import com.arjuna.ats.arjuna.state.OutputObjectState;
+import io.narayana.lra.LRAConstants;
 import io.narayana.lra.coordinator.domain.model.FailedLongRunningAction;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.domain.service.LRAService;
 import io.narayana.lra.logging.LRALogger;
+import jakarta.enterprise.inject.spi.CDI;
 import java.io.IOException;
 import java.net.URI;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Map;
 import java.util.function.Consumer;
 import org.eclipse.microprofile.lra.annotation.LRAStatus;
 
-public class LRARecoveryModule implements RecoveryModule {
+public class LRARecoveryModule implements RecoveryModule,
+        ClusterCoordinationService.CoordinatorChangeListener {
+
+    // HA components
+    private LRAStore lraStore;
+    private LockManager lockManager;
+    private ClusterCoordinationService clusterCoordinator;
+    private volatile boolean isRecoveryLeader = false;
+    private volatile boolean haEnabled = false;
+
     public LRARecoveryModule() {
         service = new LRAService();
 
@@ -38,6 +52,87 @@ public class LRARecoveryModule implements RecoveryModule {
 
         _transactionStatusConnectionMgr = new TransactionStatusConnectionManager();
         Implementations.install();
+
+        // Initialize HA components if available
+        initializeHAComponents();
+    }
+
+    /**
+     * Initializes HA components if HA mode is explicitly enabled via the
+     * {@code lra.coordinator.ha.enabled} system property.
+     *
+     * <p>
+     * The configuration property is the single source of truth: if it is not
+     * set to {@code true}, no CDI lookups for HA beans are attempted. This
+     * avoids unnecessary bean instantiation (and potential classpath issues)
+     * for developers who do not use the HA feature.
+     * </p>
+     */
+    private void initializeHAComponents() {
+        // Configuration property is the single source of truth
+        String haEnabledProp = System.getProperty("lra.coordinator.ha.enabled", "false");
+        if (!"true".equalsIgnoreCase(haEnabledProp)) {
+            LRALogger.logger.debug("HA mode disabled (lra.coordinator.ha.enabled != true), "
+                    + "running in single-instance mode");
+            return;
+        }
+
+        try {
+            // Try to get CDI container
+            CDI<Object> cdi = CDI.current();
+
+            // Try to get HA components from CDI
+            this.lraStore = tryGetBean(cdi, LRAStore.class);
+            this.lockManager = tryGetBean(cdi, LockManager.class);
+            this.clusterCoordinator = tryGetBean(cdi, ClusterCoordinationService.class);
+
+            if (lraStore == null) {
+                LRALogger.logger.error("HA mode is enabled (lra.coordinator.ha.enabled=true) "
+                        + "but LRAStore bean is not available. Check that the Infinispan "
+                        + "dependencies are on the classpath and CDI is properly configured.");
+                return;
+            }
+
+            this.haEnabled = true;
+            service.initializeHA(lraStore, lockManager, clusterCoordinator);
+
+            // Register for cluster coordinator change notifications
+            if (clusterCoordinator != null && clusterCoordinator.isInitialized()) {
+                clusterCoordinator.addCoordinatorChangeListener(this);
+                // Seed isRecoveryLeader from the coordinator's current state so
+                // recovery works immediately without waiting for a view change event
+                this.isRecoveryLeader = clusterCoordinator.isCoordinator();
+                LRALogger.logger.info("LRARecoveryModule registered for cluster coordinator notifications");
+            } else {
+                // No cluster coordinator available (single-node HA, CDI lookup
+                // failure, or JGroups not configured). This node must assume
+                // recovery leadership, otherwise recovery never runs because
+                // onBecameCoordinator() is never called.
+                this.isRecoveryLeader = true;
+                LRALogger.logger.info(
+                        "LRARecoveryModule: no cluster coordinator available, assuming recovery leadership");
+            }
+
+            LRALogger.logger.info("LRARecoveryModule initialized with HA components");
+        } catch (IllegalStateException e) {
+            // CDI not available - HA was requested but cannot be fulfilled
+            LRALogger.logger.error("HA mode is enabled but CDI is not available. "
+                    + "HA components cannot be initialized.");
+        } catch (Exception e) {
+            LRALogger.logger.error("HA mode is enabled but initialization failed", e);
+        }
+    }
+
+    /**
+     * Safely tries to get a CDI bean, returning null if not available.
+     */
+    private <T> T tryGetBean(CDI<Object> cdi, Class<T> beanClass) {
+        try {
+            return cdi.select(beanClass).get();
+        } catch (Exception e) {
+            LRALogger.logger.debugf("Bean %s not available: %s", beanClass.getSimpleName(), e.getMessage());
+            return null;
+        }
     }
 
     public static LRAService getService() {
@@ -83,20 +178,272 @@ public class LRARecoveryModule implements RecoveryModule {
         }
     }
 
+    /**
+     * Periodic recovery pass - performs recovery of LRA transactions.
+     * In HA mode, only the cluster coordinator performs recovery to avoid conflicts.
+     */
     public void periodicWorkSecondPass() {
         if (LRALogger.logger.isTraceEnabled()) {
             LRALogger.logger.trace("LRARecoveryModule: second pass");
         }
 
+        // In HA mode, only the cluster coordinator performs recovery
+        if (haEnabled && !isRecoveryLeader) {
+            if (LRALogger.logger.isTraceEnabled()) {
+                LRALogger.logger.trace("LRARecoveryModule: skipping recovery (not the cluster coordinator)");
+            }
+            return;
+        }
+
+        // In HA mode, check if cache is available (not in minority partition)
+        if (haEnabled && lraStore != null && !lraStore.isAvailable()) {
+            if (LRALogger.logger.isDebugEnabled()) {
+                LRALogger.logger.debug("LRARecoveryModule: skipping recovery (cache in DEGRADED_MODE - minority partition)");
+            }
+            return;
+        }
+
+        // Check for timed-out LRAs (HA mode only - safety net if coordinator fails before timeout)
+        checkForTimedOutLRAs();
+
+        // Recover pending transactions
         recoverTransactions();
     }
 
+    // CoordinatorChangeListener implementation for JGroups coordinator election
+
+    /**
+     * Called when this node becomes the cluster coordinator.
+     * Immediately triggers a recovery pass.
+     */
+    @Override
+    public void onBecameCoordinator() {
+        isRecoveryLeader = true;
+        LRALogger.logger.info("LRARecoveryModule: This node became the cluster coordinator, starting immediate recovery");
+
+        // Perform immediate recovery pass when becoming coordinator
+        try {
+            recoverTransactions();
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Error during immediate recovery after becoming coordinator");
+        }
+    }
+
+    /**
+     * Called when this node loses cluster coordinator status.
+     * Stops performing recovery.
+     */
+    @Override
+    public void onLostCoordinator() {
+        isRecoveryLeader = false;
+        LRALogger.logger.info("LRARecoveryModule: This node lost cluster coordinator status, stopping recovery");
+    }
+
+    /**
+     * Recovers LRA transactions.
+     * In HA mode, loads from distributed store.
+     * In single-instance mode, loads from ObjectStore.
+     */
     private synchronized void recoverTransactions() {
+        if (haEnabled && lraStore != null) {
+            recoverTransactionsFromDistributedStore();
+        } else {
+            recoverTransactionsFromObjectStore();
+        }
+    }
+
+    /**
+     * Recovers LRAs from distributed store (HA mode).
+     * Uses distributed locks to coordinate recovery across cluster.
+     */
+    private void recoverTransactionsFromDistributedStore() {
+        if (LRALogger.logger.isDebugEnabled()) {
+            LRALogger.logger.debug("LRARecoveryModule: recovering transactions from distributed store");
+        }
+
+        try {
+            // Get all recovering LRAs from the store
+            Collection<io.narayana.lra.coordinator.domain.model.LRAState> recoveringLRAs = lraStore.getAllRecoveringLRAs();
+
+            if (recoveringLRAs == null || recoveringLRAs.isEmpty()) {
+                if (LRALogger.logger.isTraceEnabled()) {
+                    LRALogger.logger.trace("No recovering LRAs found in distributed store");
+                }
+                return;
+            }
+
+            int recoveryCount = 0;
+            int lockedCount = 0;
+
+            // Iterate over all recovering LRAs
+            for (io.narayana.lra.coordinator.domain.model.LRAState state : recoveringLRAs) {
+                URI lraId = state.getId();
+
+                // Try to acquire distributed lock (with short timeout to avoid blocking)
+                LockManager.LockHandle lockHandle = null;
+                if (lockManager != null) {
+                    lockHandle = lockManager.acquireLock(lraId, 100,
+                            java.util.concurrent.TimeUnit.MILLISECONDS);
+                    if (lockHandle == null) {
+                        // Another node is recovering this LRA
+                        lockedCount++;
+                        if (LRALogger.logger.isTraceEnabled()) {
+                            LRALogger.logger.tracef(
+                                    "LRARecoveryModule: Skipping LRA %s (locked by another node)", lraId);
+                        }
+                        continue;
+                    }
+                }
+
+                try {
+                    // Recover this LRA
+                    doRecoverTransactionFromState(lraId, state);
+                    recoveryCount++;
+                } catch (Exception e) {
+                    LRALogger.logger.warnf(e, "Error recovering LRA %s from distributed store", lraId);
+                } finally {
+                    // Release distributed lock
+                    if (lockHandle != null) {
+                        try {
+                            lockHandle.release();
+                        } catch (Exception e) {
+                            LRALogger.logger.warnf(e, "Error releasing lock for LRA %s", lraId);
+                        }
+                    }
+                }
+            }
+
+            if (LRALogger.logger.isDebugEnabled()) {
+                LRALogger.logger.debugf(
+                        "LRARecoveryModule: Recovered %d LRAs from distributed store (%d skipped - locked by other nodes)",
+                        recoveryCount, lockedCount);
+            }
+
+        } catch (Exception e) {
+            LRALogger.logger.errorf(e, "Error during distributed store recovery, falling back to ObjectStore");
+            recoverTransactionsFromObjectStore();
+        }
+    }
+
+    /**
+     * Scans active LRAs in the distributed store for expired timeouts and
+     * moves them to the recovering cache.
+     *
+     * This is needed because if the creating coordinator dies before its local
+     * {@code scheduledAbort} fires, the timed-out LRA stays in the active cache
+     * and {@link #recoverTransactionsFromDistributedStore()} never sees it
+     * (it only scans the recovering cache). Moving the entry here makes it
+     * visible to the normal recovery path, which loads it via
+     * {@code restore_state()} — that method already detects the expired
+     * {@code finishTime} and schedules cancellation.
+     *
+     * Only runs in HA mode; single-instance mode relies on local schedulers.
+     */
+    private void checkForTimedOutLRAs() {
+        if (!haEnabled || lraStore == null) {
+            return;
+        }
+
+        try {
+            Map<String, io.narayana.lra.coordinator.domain.model.LRAState> activeLRAs = lraStore.getAllActiveLRAs();
+
+            if (activeLRAs == null || activeLRAs.isEmpty()) {
+                return;
+            }
+
+            LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+            int movedCount = 0;
+
+            for (java.util.Map.Entry<String, io.narayana.lra.coordinator.domain.model.LRAState> entry : activeLRAs.entrySet()) {
+                io.narayana.lra.coordinator.domain.model.LRAState state = entry.getValue();
+
+                if (state.getFinishTime() != null && now.isAfter(state.getFinishTime())
+                        && state.getStatus() == LRAStatus.Active) {
+                    URI lraId = state.getId();
+
+                    // Move to the recovering cache so that
+                    // recoverTransactionsFromDistributedStore() picks it up.
+                    // That path acquires distributed locks and calls
+                    // restore_state() which handles the actual cancellation.
+                    lraStore.moveToRecovering(lraId, state);
+                    movedCount++;
+
+                    if (LRALogger.logger.isDebugEnabled()) {
+                        LRALogger.logger.debugf(
+                                "LRARecoveryModule: moved timed-out LRA %s to recovering cache (finishTime=%s)",
+                                lraId, state.getFinishTime());
+                    }
+                }
+            }
+
+            if (movedCount > 0 && LRALogger.logger.isInfoEnabled()) {
+                LRALogger.logger.infof(
+                        "LRARecoveryModule: moved %d timed-out LRAs to recovering cache", movedCount);
+            }
+
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Error checking for timed-out LRAs");
+        }
+    }
+
+    /**
+     * Recovers LRAs from ObjectStore (single-instance mode).
+     * This is the original recovery logic.
+     */
+    private void recoverTransactionsFromObjectStore() {
+        if (LRALogger.logger.isDebugEnabled()) {
+            LRALogger.logger.debug("LRARecoveryModule: recovering transactions from ObjectStore");
+        }
+
         // uids per transaction type
         InputObjectState aa_uids = new InputObjectState();
 
         if (getUids(_transactionType, aa_uids)) {
             processTransactionsStatus(processTransactions(aa_uids));
+        }
+    }
+
+    /**
+     * Recovers a single LRA from its LRAState (distributed store recovery).
+     */
+    private void doRecoverTransactionFromState(URI lraId, io.narayana.lra.coordinator.domain.model.LRAState state) {
+        try {
+            // Extract UID from LRA ID
+            String uidString = LRAConstants.getLRAUid(lraId);
+            Uid recoverUid = new Uid(uidString);
+            // Derive the ActionStatus from the LRAState so that RecoveringLRA.tryReplayPhase2()
+            // makes the correct decision about whether/how to replay
+            int theStatus = toActionStatus(state.getStatus());
+            // Create RecoveringLRA from the state
+            RecoveringLRA lra = new RecoveringLRA(service, recoverUid, theStatus);
+            // Restore state from LRAState
+            if (!lra.fromLRAState(state)) {
+                LRALogger.logger.warnf("Failed to restore LRA %s from state", lraId);
+                return;
+            }
+            LRAStatus lraStatus = lra.getLRAStatus();
+            // Handle failed LRAs
+            if (LRAStatus.FailedToCancel.equals(lraStatus) || LRAStatus.FailedToClose.equals(lraStatus)) {
+                moveEntryToFailedLRAPath(lraId, state);
+                return;
+            }
+            // Add to LRAService if not already known
+            if (!service.hasTransaction(lra.getId())) {
+                service.addTransaction(lra);
+            }
+            if (LRALogger.logger.isDebugEnabled()) {
+                LRALogger.logger.debugf("LRARecoveryModule: recovering LRA %s, status: %s", lraId, lraStatus);
+            }
+            // Replay phase 2 if necessary
+            boolean inFlight = (lraStatus == LRAStatus.Active);
+            if (!inFlight && lra.hasPendingActions()) {
+                lra.replayPhase2();
+                if (!lra.isRecovering()) {
+                    service.finished(lra, false);
+                }
+            }
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Error recovering LRA %s", lraId);
         }
     }
 
@@ -142,6 +489,10 @@ public class LRARecoveryModule implements RecoveryModule {
         }
     }
 
+    /**
+     * Moves an LRA entry to the failed LRA path.
+     * Overloaded version that takes a Uid (for ObjectStore).
+     */
     public boolean moveEntryToFailedLRAPath(final Uid failedUid) {
         String failedLRAType = FailedLongRunningAction.FAILED_LRA_TYPE;
         boolean moved = false;
@@ -172,6 +523,31 @@ public class LRARecoveryModule implements RecoveryModule {
             LRALogger.i18nLogger.warn_move_lra_record(failedUid.toString(), e.getMessage());
         }
         return moved;
+    }
+
+    /**
+     * Moves an LRA entry to the failed state.
+     * In HA mode, uses LRAStore.moveToFailed() which is atomic.
+     * In single-instance mode, delegates to moveEntryToFailedLRAPath(Uid).
+     */
+    private boolean moveEntryToFailedLRAPath(URI lraId,
+            io.narayana.lra.coordinator.domain.model.LRAState state) {
+        if (haEnabled && lraStore != null) {
+            // In HA mode, use LRAStore.moveToFailed() which is atomic
+            try {
+                lraStore.moveToFailed(lraId);
+                LRALogger.logger.infof("Failed LRA %s moved to failed state in distributed store", lraId);
+                return true;
+            } catch (Exception e) {
+                LRALogger.logger.warnf(e, "Failed to move LRA %s to failed state in distributed store", lraId);
+                return false;
+            }
+        } else {
+            // In single-instance mode, use ObjectStore
+            String uidString = io.narayana.lra.LRAConstants.getLRAUid(lraId);
+            Uid uid = new Uid(uidString);
+            return moveEntryToFailedLRAPath(uid);
+        }
     }
 
     private Collection<Uid> processTransactions(InputObjectState uids) {
@@ -235,6 +611,52 @@ public class LRARecoveryModule implements RecoveryModule {
 
     public void recover() {
         recoverTransactions();
+    }
+
+    /**
+     * Checks if this node is the current recovery leader.
+     * In HA mode, only the Raft leader performs recovery.
+     * In single-instance mode, always returns true.
+     *
+     * @return true if this node is performing recovery
+     */
+    public boolean isRecoveryLeader() {
+        return !haEnabled || isRecoveryLeader;
+    }
+
+    /**
+     * Checks if HA mode is enabled.
+     *
+     * @return true if HA is enabled
+     */
+    public boolean isHaEnabled() {
+        return haEnabled;
+    }
+
+    /**
+     * Maps an LRAStatus from the distributed store to the corresponding
+     * Arjuna ActionStatus used by RecoveringLRA to drive replay decisions.
+     *
+     * @param lraStatus the LRA status
+     * @return the corresponding ActionStatus
+     */
+    private static int toActionStatus(LRAStatus lraStatus) {
+        switch (lraStatus) {
+            case Closing:
+                return ActionStatus.COMMITTING;
+            case Cancelling:
+                return ActionStatus.ABORTING;
+            case Closed:
+                return ActionStatus.COMMITTED;
+            case Cancelled:
+                return ActionStatus.ABORTED;
+            case FailedToClose:
+            case FailedToCancel:
+                return ActionStatus.H_HAZARD;
+            case Active:
+            default:
+                return ActionStatus.RUNNING;
+        }
     }
 
     public void getFailedLRAs(Map<URI, LongRunningAction> lras) {

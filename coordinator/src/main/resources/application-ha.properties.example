@@ -1,0 +1,67 @@
+# LRA Coordinator High Availability Configuration Example
+#
+# This file shows how to configure LRA HA mode with Infinispan and JGroups
+
+# Enable HA mode
+lra.coordinator.ha.enabled=true
+
+# Cluster name - all coordinators in the same cluster must use the same name
+lra.coordinator.cluster.name=lra-cluster
+
+# Node ID for this coordinator instance
+# If not set, will use HOSTNAME environment variable (useful in Kubernetes)
+# or fall back to Narayana node identifier
+lra.coordinator.node.id=lra-coord-1
+
+# JGroups configuration file
+# Default is "default-jgroups-udp.xml" from JGroups classpath
+# You can provide a custom configuration for production deployments
+lra.coordinator.jgroups.config=default-jgroups-udp.xml
+
+# Infinispan persistent location
+# Where Infinispan stores global state
+lra.coordinator.infinispan.persistent.location=/var/lib/lra/infinispan
+
+# Recovery scan interval (milliseconds)
+# How often the recovery coordinator scans for LRAs needing recovery
+# Only the cluster coordinator performs recovery
+com.arjuna.ats.arjuna.recovery.periodicRecoveryPeriod=120000
+
+# Recovery backoff period (milliseconds)
+# Delay before first recovery attempt
+com.arjuna.ats.arjuna.recovery.recoveryBackoffPeriod=10000
+
+# Object store configuration
+# In HA mode, multiple coordinators can share the same object store
+# because the node ID is embedded in LRA IDs
+com.arjuna.ats.arjuna.objectstore.objectStoreDir=/var/lib/lra/tx-object-store
+
+# Narayana node identifier
+# Used as fallback if lra.coordinator.node.id is not set
+com.arjuna.ats.arjuna.common.CoordinatorEnvironmentBean.nodeIdentifier=1
+
+# Kubernetes/OpenShift deployment notes:
+# - Set HOSTNAME environment variable (automatically set to pod name in K8s)
+# - Use a headless service for cluster discovery
+# - Configure JGroups to use Kubernetes discovery protocol (KUBE_PING)
+# - Mount persistent volumes for object store and Infinispan data
+# - Use StatefulSet for stable pod identities
+
+# Example Kubernetes JGroups config with KUBE_PING:
+# lra.coordinator.jgroups.config=jgroups-kubernetes.xml
+#
+# jgroups-kubernetes.xml should include:
+# <config>
+#   <KUBE_PING namespace="default"/>
+#   <MERGE3/>
+#   <FD_SOCK/>
+#   <FD_ALL/>
+#   <VERIFY_SUSPECT/>
+#   <pbcast.NAKACK2/>
+#   <UNICAST3/>
+#   <pbcast.STABLE/>
+#   <pbcast.GMS/>
+#   <UFC/>
+#   <MFC/>
+#   <FRAG2/>
+# </config>

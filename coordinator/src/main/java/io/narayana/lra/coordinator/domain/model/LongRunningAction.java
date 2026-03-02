@@ -22,6 +22,7 @@ import io.narayana.lra.Current;
 import io.narayana.lra.LRAConstants;
 import io.narayana.lra.LRAData;
 import io.narayana.lra.coordinator.domain.service.LRAService;
+import io.narayana.lra.coordinator.internal.LRAStore;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.ws.rs.ServiceUnavailableException;
 import jakarta.ws.rs.WebApplicationException;
@@ -63,12 +64,34 @@ public class LongRunningAction extends BasicAction {
     private ScheduledFuture<?> scheduledAbort;
     private final LRAService lraService;
     LRAParentAbstractRecord par;
+    private long timeLimit; // Added for HA state tracking
+    private LRAStore lraStore; // Optional, injected by LRAService for HA mode
+    private boolean serializingForHA; // Guard against recursive Infinispan save from toLRAState()
 
     private static long initParticipantEnlistTimeout() {
         try {
             return ConfigProvider.getConfig().getValue(ENLIST_PARTICIPANT_LOCK_TIMEOUT, Long.class);
         } catch (Exception e) {
             return 500; // the property is unset or there is no config provider so use the default value
+        }
+    }
+
+    /**
+     * Builds the UID path segment of the LRA ID.
+     * In HA mode, embeds the node ID: {NodeId}/{Uid}
+     * In single-instance mode, uses just: {Uid}
+     *
+     * @param lraService the LRAService
+     * @return the UID path segment
+     */
+    private String buildUidPath(LRAService lraService) {
+        String uidString = get_uid().fileStringForm();
+
+        if (lraService != null && lraService.isHaEnabled()) {
+            String nodeId = lraService.getNodeId();
+            return String.format("%s/%s", nodeId, uidString);
+        } else {
+            return uidString;
         }
     }
 
@@ -87,14 +110,17 @@ public class LongRunningAction extends BasicAction {
 
         this.lraService = lraService;
 
+        // Build LRA ID with optional node ID embedding for HA mode
+        String uidPath = buildUidPath(lraService);
+
         if (parent != null) {
             this.parentId = parent.getId();
             // encode the parent in the child URI (by rights we'd use LRA_HTTP_PARENT_CONTEXT_HEADER)
             // the parent is used by children to contact parents in certain scenarios
             // BTW  this technique is historical and needs to be changed to use the header
-            this.id = Current.buildFullLRAUrl(String.format("%s/%s", baseUrl, get_uid().fileStringForm()), parent.getId());
+            this.id = Current.buildFullLRAUrl(String.format("%s/%s", baseUrl, uidPath), parent.getId());
         } else {
-            this.id = new URI(String.format("%s/%s", baseUrl, get_uid().fileStringForm()));
+            this.id = new URI(String.format("%s/%s", baseUrl, uidPath));
         }
 
         this.clientId = clientId;
@@ -180,6 +206,29 @@ public class LongRunningAction extends BasicAction {
         } finally {
             if (LRALogger.logger.isTraceEnabled()) {
                 trace_progress("saved");
+            }
+        }
+
+        // Persist to distributed store only after all serialization into os
+        // has completed successfully. Doing this mid-stream would capture an
+        // incomplete buffer and would create divergence if save_state() failed
+        // after the Infinispan write.
+        // The serializingForHA guard prevents recursive saves when toLRAState()
+        // calls save_state() purely for serialization.
+        if (!serializingForHA && lraStore != null && lraStore.isHaEnabled() && id != null) {
+            try {
+                LRAState state = DefaultLRAState.fromLongRunningAction(this, os);
+                lraStore.saveLRA(id, state);
+                if (LRALogger.logger.isTraceEnabled()) {
+                    LRALogger.logger.tracef("LRA %s saved to distributed store", id);
+                }
+            } catch (Exception e) {
+                // Fail the save so the caller (deactivate/updateState) can
+                // signal the error.  The local ObjectStore already has the
+                // state, so a retry will attempt the Infinispan write again.
+                LRALogger.logger.errorf(e, "Failed to save LRA %s to distributed store — "
+                        + "failing save_state so the caller can retry", id);
+                return false;
             }
         }
 
@@ -1281,6 +1330,68 @@ public class LongRunningAction extends BasicAction {
 
     public URI getParentId() {
         return parentId;
+    }
+
+    public LocalDateTime getStartTime() {
+        return startTime;
+    }
+
+    public LocalDateTime getFinishTime() {
+        return finishTime;
+    }
+
+    public long getTimeLimit() {
+        return timeLimit;
+    }
+
+    /**
+     * Sets the LRAStore for HA mode persistence.
+     * Called by LRAService when HA is enabled.
+     *
+     * @param lraStore the LRA store implementation
+     */
+    public void setLRAStore(LRAStore lraStore) {
+        this.lraStore = lraStore;
+    }
+
+    /**
+     * Converts this LongRunningAction to an LRAState for distributed storage.
+     * This is used in HA mode to persist the LRA state to the distributed store.
+     *
+     * @return LRAState representing this LRA
+     */
+    public LRAState toLRAState() throws IOException {
+        OutputObjectState oos = new OutputObjectState();
+        // Set guard to prevent save_state() from triggering a recursive
+        // Infinispan save — toLRAState() is only for serialization.
+        serializingForHA = true;
+        try {
+            if (!save_state(oos, 0)) {
+                throw new IOException("Failed to serialize LongRunningAction to OutputObjectState");
+            }
+        } finally {
+            serializingForHA = false;
+        }
+        return DefaultLRAState.fromLongRunningAction(this, oos);
+    }
+
+    /**
+     * Restores this LongRunningAction from an LRAState loaded from distributed storage.
+     *
+     * @param state the LRAState to restore from
+     * @return true if restoration succeeded
+     */
+    public boolean fromLRAState(LRAState state) {
+        if (state == null) {
+            return false;
+        }
+
+        InputObjectState ios = state.toInputObjectState();
+        if (ios == null) {
+            return false;
+        }
+
+        return restore_state(ios, 0);
     }
 
     private boolean hasElements(RecordList list) {

@@ -1095,6 +1095,7 @@ public class LongRunningAction extends BasicAction {
         }
 
         int res = super.Begin(null);
+        startTime = LocalDateTime.now(ZoneOffset.UTC);
 
         if (parentId != null) {
             // We want LRAs to be TopLevelActions (TLA).
@@ -1111,8 +1112,6 @@ public class LongRunningAction extends BasicAction {
                 }
             }
         }
-
-        startTime = LocalDateTime.now(ZoneOffset.UTC);
 
         if (LRALogger.logger.isTraceEnabled()) {
             trace_progress("begin, deactivating");

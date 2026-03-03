@@ -2,7 +2,11 @@
 
 ## Overview
 
-This implementation enables multiple LRA coordinators to work together in a cluster, addressing the key requirements:
+This module (`lra-coordinator-ha-infinispan`) provides High Availability for the LRA Coordinator using Infinispan distributed caches and JGroups clustering. It is a **separate Maven module** that has no compile-time dependency from the core coordinator — projects opt in by adding this module to their classpath and setting `lra.coordinator.ha.enabled=true`.
+
+For integration instructions, see [README-HA.md](README-HA.md).
+
+### Requirements
 
 1. **Shared Object Store**: Different coordinators can share an object store by embedding node ID in LRA IDs
 2. **Any Coordinator Can Manage Any LRA**: Distributed locking ensures safe concurrent access
@@ -11,27 +15,50 @@ This implementation enables multiple LRA coordinators to work together in a clus
 
 ## Architecture
 
+### Module Structure
+
+```
+coordinator/                         # Core coordinator (no Infinispan dependency)
+  domain/model/
+    LRAState.java                    # Interface — defines the LRA state contract
+    DefaultLRAState.java             # Plain POJO implementation (no serialization annotations)
+  internal/
+    LRAStore.java                    # Interface for distributed LRA storage
+    LockManager.java                 # Interface for distributed locking
+    ClusterCoordinationService.java  # Interface for leader election
+    LRARecoveryModule.java           # Checks lra.coordinator.ha.enabled before CDI lookups
+
+coordinator-ha-infinispan/           # HA module (this module)
+  internal/infinispan/
+    InfinispanLRAState.java          # ProtoStream-annotated LRAState implementation
+    InfinispanStore.java             # LRAStore implementation using Infinispan caches
+    InfinispanLockManager.java       # LockManager using Infinispan Clustered Locks
+    InfinispanClusterCoordinator.java# Leader election via JGroups view
+    InfinispanConfiguration.java     # CDI producer for caches and managers
+    LRASchemaInitializer.java        # ProtoStream schema generation
+```
+
 ### Components
 
 1. **InfinispanStore** - Distributed LRA state storage
    - Three replicated caches: active, recovering, failed
-   - Automatic state replication across cluster
+   - Converts `LRAState` (interface) to `InfinispanLRAState` (ProtoStream-serializable) on save
    - Any coordinator can access any LRA state
 
-2. **DistributedLockManager** - Infinispan clustered locks
+2. **InfinispanLockManager** - Infinispan clustered locks
    - Prevents concurrent modifications to same LRA
    - Uses Infinispan's lock API (backed by JGroups)
    - Automatic lock release on node failure
 
-3. **ClusterCoordinator** - JGroups coordinator election
+3. **InfinispanClusterCoordinator** - JGroups coordinator election
    - First node in cluster view becomes coordinator
    - Automatic failover when coordinator fails
    - Only coordinator performs recovery scans
 
-4. **LRAState** - Serializable LRA representation
-   - Contains all LRA state for distributed storage
-   - Includes node ID for tracking LRA origin
-   - Used for Infinispan cache entries
+4. **InfinispanLRAState** - ProtoStream-serializable LRA representation
+   - Implements the `LRAState` interface from the core coordinator
+   - `@ProtoField` / `@ProtoFactory` annotations for Infinispan cache serialization
+   - Converts from any `LRAState` implementation via `InfinispanLRAState.from(state)`
 
 #### Node ID Embedding
 
@@ -250,7 +277,15 @@ Network partitions are **automatically handled by Infinispan** using the `DENY_R
 
 ## Testing
 
-To test HA mode:
+### Unit Tests
+
+```bash
+mvn test -pl coordinator-ha-infinispan
+```
+
+22 tests covering cache operations, state replication, distributed locking, cache availability, state transitions, concurrent access, node ID embedding, and reentrant lock safety.
+
+### Manual HA Failover Test
 
 1. Start multiple coordinator instances with same cluster name
 2. Create LRAs on different coordinators
@@ -283,7 +318,9 @@ Using Infinispan transactions would make these operations atomic but adds latenc
 
 ### Serialization
 
-Infinispan uses ProtoStream (the default and recommended marshaller for Infinispan 16.x) to serialize `LRAState` objects. The `LRAState` class is annotated with `@ProtoFactory` and `@ProtoField`, and an `@AutoProtoSchemaBuilder` interface (`LRASchemaInitializer`) generates the schema and marshaller at compile time. Non-proto types (`URI`, `LRAStatus`, `LocalDateTime`) are converted to/from `String` in the proto-annotated constructor and getters.
+Infinispan uses ProtoStream (the default and recommended marshaller for Infinispan 16.x) to serialize `InfinispanLRAState` objects. The `InfinispanLRAState` class is annotated with `@ProtoFactory` and `@ProtoField`, and an `@AutoProtoSchemaBuilder` interface (`LRASchemaInitializer`) generates the schema and marshaller at compile time. Non-proto types (`URI`, `LRAStatus`, `LocalDateTime`) are converted to/from `String` in the proto-annotated constructor and getters.
+
+The core coordinator's `LRAState` interface and `DefaultLRAState` POJO have no ProtoStream annotations — the conversion happens in `InfinispanStore.saveLRA()` which calls `InfinispanLRAState.from(state)` to copy the fields into the serializable form.
 
 ### Known Limitations
 

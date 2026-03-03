@@ -5,6 +5,7 @@
 
 package io.narayana.lra.coordinator.infinispan;
 
+import io.narayana.lra.coordinator.domain.model.LRAState;
 import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
 import io.narayana.lra.coordinator.internal.LockManager;
 import io.narayana.lra.logging.LRALogger;
@@ -187,7 +188,7 @@ public class InfinispanConfiguration {
     @Produces
     @ApplicationScoped
     @Named("activeLRACache")
-    public Cache<String, InfinispanLRAState> activeLRACache() {
+    public Cache<String, LRAState> activeLRACache() {
         if (!initialized) {
             initialize();
         }
@@ -202,7 +203,7 @@ public class InfinispanConfiguration {
     @Produces
     @ApplicationScoped
     @Named("recoveringLRACache")
-    public Cache<String, InfinispanLRAState> recoveringLRACache() {
+    public Cache<String, LRAState> recoveringLRACache() {
         if (!initialized) {
             initialize();
         }
@@ -217,7 +218,7 @@ public class InfinispanConfiguration {
     @Produces
     @ApplicationScoped
     @Named("failedLRACache")
-    public Cache<String, InfinispanLRAState> failedLRACache() {
+    public Cache<String, LRAState> failedLRACache() {
         if (!initialized) {
             initialize();
         }

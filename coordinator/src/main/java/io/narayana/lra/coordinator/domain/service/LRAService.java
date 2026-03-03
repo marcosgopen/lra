@@ -116,7 +116,7 @@ public class LRAService {
             // Use computeIfAbsent to atomically check and load
             lra = lras.computeIfAbsent(lraId, key -> {
                 try {
-                    io.narayana.lra.coordinator.domain.model.LRAState state = lraStore.loadLRA(key);
+                    LRAState state = lraStore.loadLRA(key);
                     if (state != null) {
                         // Create a RecoveringLRA from the state
                         LongRunningAction recoveredLra = new LongRunningAction(this,

@@ -19,6 +19,7 @@ import com.arjuna.ats.arjuna.state.InputObjectState;
 import com.arjuna.ats.arjuna.state.OutputObjectState;
 import io.narayana.lra.LRAConstants;
 import io.narayana.lra.coordinator.domain.model.FailedLongRunningAction;
+import io.narayana.lra.coordinator.domain.model.LRAState;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.domain.service.LRAService;
 import io.narayana.lra.logging.LRALogger;
@@ -30,6 +31,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.function.Consumer;
 import org.eclipse.microprofile.lra.annotation.LRAStatus;
 
@@ -345,7 +347,7 @@ public class LRARecoveryModule implements RecoveryModule,
         }
 
         try {
-            Map<String, io.narayana.lra.coordinator.domain.model.LRAState> activeLRAs = lraStore.getAllActiveLRAs();
+            Map<String, LRAState> activeLRAs = lraStore.getAllActiveLRAs();
 
             if (activeLRAs == null || activeLRAs.isEmpty()) {
                 return;
@@ -354,8 +356,8 @@ public class LRARecoveryModule implements RecoveryModule,
             LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
             int movedCount = 0;
 
-            for (java.util.Map.Entry<String, io.narayana.lra.coordinator.domain.model.LRAState> entry : activeLRAs.entrySet()) {
-                io.narayana.lra.coordinator.domain.model.LRAState state = entry.getValue();
+            for (Entry<String, LRAState> entry : activeLRAs.entrySet()) {
+                LRAState state = entry.getValue();
 
                 if (state.getFinishTime() != null && now.isAfter(state.getFinishTime())
                         && state.getStatus() == LRAStatus.Active) {

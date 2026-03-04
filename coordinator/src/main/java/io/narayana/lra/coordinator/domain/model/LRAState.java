@@ -61,6 +61,16 @@ public interface LRAState {
     }
 
     /**
+     * Returns the optimistic concurrency control version of this state.
+     * Each successful CAS write increments the version.
+     *
+     * @return the version number (0 for new/unsaved states)
+     */
+    default long getVersion() {
+        return 0L;
+    }
+
+    /**
      * Checks if this LRA has finished.
      *
      * @return true if the LRA has finished

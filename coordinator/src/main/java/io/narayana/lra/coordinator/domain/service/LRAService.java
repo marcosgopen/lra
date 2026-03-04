@@ -23,7 +23,6 @@ import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
 import io.narayana.lra.coordinator.internal.LRARecoveryModule;
 import io.narayana.lra.coordinator.internal.LRAStore;
-import io.narayana.lra.coordinator.internal.LockManager;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.WebApplicationException;
@@ -52,13 +51,9 @@ public class LRAService {
 
     // HA components (injected by LRARecoveryModule when HA is enabled)
     private LRAStore lraStore;
-    private LockManager lockManager;
     private ClusterCoordinationService clusterCoordinator;
     private String nodeId;
     private boolean haEnabled = false;
-
-    // Map to track distributed lock handles for cleanup
-    private final Map<URI, LockManager.LockHandle> lockHandles = new ConcurrentHashMap<>();
 
     /**
      * Gets a transaction by LRA ID.
@@ -174,169 +169,51 @@ public class LRAService {
 
     /**
      * Acquires a lock for an LRA (blocking).
-     * In HA mode, acquires both distributed and local locks.
-     * <p>
-     * The distributed lock is only acquired on the first (non-reentrant) call.
-     * Infinispan's {@code ClusteredLock} is not reentrant, so a second
-     * acquisition from the same node would deadlock. Re-entrant calls are
-     * detected via the local {@code ReentrantLock} and skip the distributed
-     * lock entirely.
+     * Cross-node conflicts are handled by optimistic concurrency control (OCC)
+     * in the distributed store, so only local thread safety is needed here.
      *
      * @param lraId the LRA ID
      * @return the lock (caller must unlock in finally block)
      */
     public synchronized ReentrantLock lockTransaction(URI lraId) {
-        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new HAReentrantLock(lraId, this));
-
-        // If the current thread already holds the local lock this is a
-        // reentrant call — just re-enter the local lock and skip the
-        // distributed lock (ClusteredLock is not reentrant).
-        if (lock.isHeldByCurrentThread()) {
-            lock.lock();
-            return lock;
-        }
-
-        // In HA mode, acquire distributed lock first
-        if (haEnabled && lockManager != null) {
-            LockManager.LockHandle distributedLock = lockManager.acquireLock(lraId);
-            if (distributedLock == null) {
-                LRALogger.logger.warnf("Failed to acquire distributed lock for LRA %s", lraId);
-                return null;
-            }
-            lockHandles.put(lraId, distributedLock);
-        }
-
-        try {
-            lock.lock();
-        } catch (Error | RuntimeException e) {
-            // Local lock failed — release the distributed lock so it is
-            // not held indefinitely.
-            releaseDistributedLock(lraId);
-            throw e;
-        }
-
+        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new ReentrantLock());
+        lock.lock();
         return lock;
     }
 
     /**
      * Tries to acquire a lock for an LRA (non-blocking).
-     * In HA mode, acquires both distributed and local locks.
      *
      * @param lraId the LRA ID
      * @return the lock if acquired, null otherwise
      */
     public synchronized ReentrantLock tryLockTransaction(URI lraId) {
-        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new HAReentrantLock(lraId, this));
+        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new ReentrantLock());
 
-        if (lock.isHeldByCurrentThread()) {
-            lock.lock();
-            return lock;
-        }
-
-        // In HA mode, try to acquire distributed lock first
-        if (haEnabled && lockManager != null) {
-            LockManager.LockHandle distributedLock = lockManager.acquireLock(lraId, 0, MILLISECONDS);
-            if (distributedLock == null) {
-                return null; // Failed to acquire distributed lock
-            }
-            lockHandles.put(lraId, distributedLock);
-        }
-
-        // Try to acquire local lock
         if (lock.tryLock()) {
             return lock;
-        } else {
-            // Failed to acquire local lock, release distributed lock
-            releaseDistributedLock(lraId);
-            return null;
         }
+        return null;
     }
 
     /**
      * Tries to acquire a lock for an LRA with timeout.
-     * In HA mode, acquires both distributed and local locks.
      *
      * @param lraId the LRA ID
      * @param timeout the timeout in milliseconds
      * @return the lock if acquired, null otherwise
      */
     public synchronized ReentrantLock tryTimedLockTransaction(URI lraId, long timeout) {
-        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new HAReentrantLock(lraId, this));
+        ReentrantLock lock = locks.computeIfAbsent(lraId, k -> new ReentrantLock());
 
-        if (lock.isHeldByCurrentThread()) {
-            lock.lock();
-            return lock;
-        }
-
-        // In HA mode, try to acquire distributed lock first with timeout
-        if (haEnabled && lockManager != null) {
-            LockManager.LockHandle distributedLock = lockManager.acquireLock(lraId, timeout,
-                    MILLISECONDS);
-            if (distributedLock == null) {
-                return null; // Failed to acquire distributed lock
-            }
-            lockHandles.put(lraId, distributedLock);
-        }
-
-        // Try to acquire local lock with timeout
         try {
             if (lock.tryLock(timeout, MILLISECONDS)) {
                 return lock;
-            } else {
-                // Failed to acquire local lock, release distributed lock
-                releaseDistributedLock(lraId);
-                return null;
             }
+            return null;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            releaseDistributedLock(lraId);
             return null;
-        }
-    }
-
-    /**
-     * Releases the distributed lock for an LRA (if in HA mode).
-     * Called internally when lock acquisition fails or when unlock is called.
-     *
-     * @param lraId the LRA ID
-     */
-    void releaseDistributedLock(URI lraId) {
-        if (haEnabled) {
-            LockManager.LockHandle handle = lockHandles.remove(lraId);
-            if (handle != null) {
-                try {
-                    handle.release();
-                } catch (Exception e) {
-                    LRALogger.logger.warnf(e, "Error releasing distributed lock for LRA %s", lraId);
-                }
-            }
-        }
-    }
-
-    /**
-     * Custom ReentrantLock that also releases distributed locks in HA mode.
-     * This maintains backward compatibility while adding distributed locking.
-     */
-    private static class HAReentrantLock extends ReentrantLock {
-        private final URI lraId;
-        private final LRAService lraService;
-
-        HAReentrantLock(URI lraId, LRAService lraService) {
-            this.lraId = lraId;
-            this.lraService = lraService;
-        }
-
-        @Override
-        public void unlock() {
-            try {
-                super.unlock();
-            } finally {
-                // Also release distributed lock if in HA mode
-                // Only release if this is the final unlock (not held by this thread anymore)
-                if (!isHeldByCurrentThread()) {
-                    lraService.releaseDistributedLock(lraId);
-                }
-            }
         }
     }
 
@@ -580,6 +457,11 @@ public class LRAService {
                     Response.status(Response.Status.PRECONDITION_FAILED)
                             .entity(String.format("Invalid base URI: '%s'", baseUri))
                             .build());
+        }
+
+        // Inject LRAStore before begin() so save_state() can persist to Infinispan
+        if (haEnabled && lraStore != null) {
+            lra.setLRAStore(lraStore);
         }
 
         status = lra.begin(timelimit);
@@ -840,14 +722,11 @@ public class LRAService {
      * Called by LRARecoveryModule when HA is enabled.
      *
      * @param lraStore the LRA store implementation
-     * @param lockManager the lock manager
      * @param clusterCoordinator the cluster coordinator
      */
     public void initializeHA(LRAStore lraStore,
-            LockManager lockManager,
             ClusterCoordinationService clusterCoordinator) {
         this.lraStore = lraStore;
-        this.lockManager = lockManager;
         this.clusterCoordinator = clusterCoordinator;
         // The caller (LRARecoveryModule) only calls this method when the
         // configuration property lra.coordinator.ha.enabled=true, so we
@@ -914,15 +793,6 @@ public class LRAService {
      */
     public LRAStore getLRAStore() {
         return lraStore;
-    }
-
-    /**
-     * Gets the lock manager (may be null if HA is disabled).
-     *
-     * @return the lock manager or null
-     */
-    public LockManager getLockManager() {
-        return lockManager;
     }
 
     /**

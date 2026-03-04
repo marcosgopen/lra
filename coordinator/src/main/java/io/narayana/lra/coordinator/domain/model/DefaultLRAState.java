@@ -38,10 +38,12 @@ public class DefaultLRAState implements LRAState {
     private final long timeLimit;
     private final String nodeId;
     private final byte[] serializedState;
+    private final long version;
 
     public DefaultLRAState(URI id, URI parentId, String clientId, LRAStatus status,
             LocalDateTime startTime, LocalDateTime finishTime,
-            long timeLimit, String nodeId, byte[] serializedState) {
+            long timeLimit, String nodeId, byte[] serializedState,
+            long version) {
         this.id = id;
         this.parentId = parentId;
         this.clientId = clientId;
@@ -51,6 +53,7 @@ public class DefaultLRAState implements LRAState {
         this.timeLimit = timeLimit;
         this.nodeId = nodeId;
         this.serializedState = serializedState;
+        this.version = version;
     }
 
     /**
@@ -61,8 +64,8 @@ public class DefaultLRAState implements LRAState {
      * @return the LRAState
      * @throws IOException if serialization fails
      */
-    public static DefaultLRAState fromLongRunningAction(LongRunningAction lra, OutputObjectState oos)
-            throws IOException {
+    public static DefaultLRAState fromLongRunningAction(LongRunningAction lra, OutputObjectState oos,
+            long version) throws IOException {
         return new DefaultLRAState(
                 lra.getId(),
                 lra.getParentId(),
@@ -72,7 +75,8 @@ public class DefaultLRAState implements LRAState {
                 lra.getFinishTime(),
                 lra.getTimeLimit(),
                 lra.getLraService() != null ? lra.getLraService().getNodeId() : null,
-                oos.buffer());
+                oos.buffer(),
+                version);
     }
 
     @Override
@@ -134,6 +138,11 @@ public class DefaultLRAState implements LRAState {
     @Override
     public byte[] getSerializedState() {
         return serializedState;
+    }
+
+    @Override
+    public long getVersion() {
+        return version;
     }
 
     @Override

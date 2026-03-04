@@ -35,12 +35,42 @@ public interface LRAStore {
     void initialize();
 
     /**
+     * Saves LRA state with compare-and-swap semantics.
+     * For new LRAs (expectedVersion == 0), uses putIfAbsent.
+     * For existing LRAs, uses replace with version check.
+     *
+     * @param lraId the LRA identifier
+     * @param state the LRA state to save
+     * @param expectedVersion the version the caller expects to be current
+     * @return the saved LRAState (with incremented version)
+     * @throws StaleStateException if version conflict detected
+     */
+    LRAState saveOrFail(URI lraId, LRAState state, long expectedVersion);
+
+    /**
      * Saves an LRA to the appropriate storage location based on its status.
+     * Default implementation delegates to {@link #saveOrFail} for backward compatibility,
+     * swallowing version conflicts (last-write-wins).
      *
      * @param lraId the LRA identifier
      * @param state the LRA state to save
      */
-    void saveLRA(URI lraId, LRAState state);
+    default void saveLRA(URI lraId, LRAState state) {
+        if (state == null) {
+            return;
+        }
+        // Last-write-wins: on version conflict, reload current version and retry
+        long version = state.getVersion();
+        for (int attempt = 0; attempt < 5; attempt++) {
+            try {
+                saveOrFail(lraId, state, version);
+                return;
+            } catch (StaleStateException e) {
+                LRAState current = loadLRA(lraId);
+                version = current != null ? current.getVersion() : 0;
+            }
+        }
+    }
 
     /**
      * Loads an LRA from storage.
@@ -59,13 +89,25 @@ public interface LRAStore {
     void removeLRA(URI lraId);
 
     /**
+     * Moves an LRA to the recovering storage location with CAS semantics.
+     *
+     * @param lraId the LRA identifier
+     * @param state the updated LRA state (typically Closing or Cancelling)
+     * @param expectedVersion the version the caller expects to be current
+     * @return true if the move succeeded, false if another node already moved it
+     */
+    boolean moveToRecovering(URI lraId, LRAState state, long expectedVersion);
+
+    /**
      * Moves an LRA to the recovering storage location.
-     * This operation should be atomic if possible.
+     * Default implementation delegates to the CAS version.
      *
      * @param lraId the LRA identifier
      * @param state the updated LRA state (typically Closing or Cancelling)
      */
-    void moveToRecovering(URI lraId, LRAState state);
+    default void moveToRecovering(URI lraId, LRAState state) {
+        moveToRecovering(lraId, state, state.getVersion());
+    }
 
     /**
      * Moves an LRA to the failed storage location.

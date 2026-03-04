@@ -23,6 +23,7 @@ import io.narayana.lra.LRAConstants;
 import io.narayana.lra.LRAData;
 import io.narayana.lra.coordinator.domain.service.LRAService;
 import io.narayana.lra.coordinator.internal.LRAStore;
+import io.narayana.lra.coordinator.internal.StaleStateException;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.ws.rs.ServiceUnavailableException;
 import jakarta.ws.rs.WebApplicationException;
@@ -67,6 +68,8 @@ public class LongRunningAction extends BasicAction {
     private long timeLimit; // Added for HA state tracking
     private LRAStore lraStore; // Optional, injected by LRAService for HA mode
     private boolean serializingForHA; // Guard against recursive Infinispan save from toLRAState()
+    private volatile long distributedVersion = 0; // OCC version for distributed store
+    private static final int MAX_OCC_RETRIES = 3;
 
     private static long initParticipantEnlistTimeout() {
         try {
@@ -216,19 +219,37 @@ public class LongRunningAction extends BasicAction {
         // The serializingForHA guard prevents recursive saves when toLRAState()
         // calls save_state() purely for serialization.
         if (!serializingForHA && lraStore != null && lraStore.isHaEnabled() && id != null) {
-            try {
-                LRAState state = DefaultLRAState.fromLongRunningAction(this, os);
-                lraStore.saveLRA(id, state);
-                if (LRALogger.logger.isTraceEnabled()) {
-                    LRALogger.logger.tracef("LRA %s saved to distributed store", id);
+            for (int attempt = 0; attempt < MAX_OCC_RETRIES; attempt++) {
+                try {
+                    LRAState state = DefaultLRAState.fromLongRunningAction(this, os, distributedVersion);
+                    LRAState saved = lraStore.saveOrFail(id, state, distributedVersion);
+                    distributedVersion = saved.getVersion();
+                    if (LRALogger.logger.isTraceEnabled()) {
+                        LRALogger.logger.tracef("LRA %s saved to distributed store (version: %d)",
+                                id, distributedVersion);
+                    }
+                    break; // success
+                } catch (StaleStateException e) {
+                    LRAState current = lraStore.loadLRA(id);
+                    if (current != null) {
+                        distributedVersion = current.getVersion();
+                    }
+                    if (attempt == MAX_OCC_RETRIES - 1) {
+                        LRALogger.logger.errorf(e, "Failed to save LRA %s to distributed store after %d OCC retries",
+                                id, MAX_OCC_RETRIES);
+                        return false; // exhausted retries
+                    }
+                    if (LRALogger.logger.isDebugEnabled()) {
+                        LRALogger.logger.debugf("OCC retry %d for LRA %s (version conflict)", attempt + 1, id);
+                    }
+                } catch (Exception e) {
+                    // Fail the save so the caller (deactivate/updateState) can
+                    // signal the error.  The local ObjectStore already has the
+                    // state, so a retry will attempt the Infinispan write again.
+                    LRALogger.logger.errorf(e, "Failed to save LRA %s to distributed store — "
+                            + "failing save_state so the caller can retry", id);
+                    return false;
                 }
-            } catch (Exception e) {
-                // Fail the save so the caller (deactivate/updateState) can
-                // signal the error.  The local ObjectStore already has the
-                // state, so a retry will attempt the Infinispan write again.
-                LRALogger.logger.errorf(e, "Failed to save LRA %s to distributed store — "
-                        + "failing save_state so the caller can retry", id);
-                return false;
             }
         }
 
@@ -1372,7 +1393,7 @@ public class LongRunningAction extends BasicAction {
         } finally {
             serializingForHA = false;
         }
-        return DefaultLRAState.fromLongRunningAction(this, oos);
+        return DefaultLRAState.fromLongRunningAction(this, oos, distributedVersion);
     }
 
     /**
@@ -1391,7 +1412,11 @@ public class LongRunningAction extends BasicAction {
             return false;
         }
 
-        return restore_state(ios, 0);
+        boolean restored = restore_state(ios, 0);
+        if (restored) {
+            this.distributedVersion = state.getVersion();
+        }
+        return restored;
     }
 
     private boolean hasElements(RecordList list) {

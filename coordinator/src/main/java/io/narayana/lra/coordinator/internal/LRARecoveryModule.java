@@ -40,10 +40,10 @@ public class LRARecoveryModule implements RecoveryModule,
 
     // HA components
     private LRAStore lraStore;
-    private LockManager lockManager;
     private ClusterCoordinationService clusterCoordinator;
     private volatile boolean isRecoveryLeader = false;
     private volatile boolean haEnabled = false;
+    private volatile boolean haInitAttempted = false;
 
     public LRARecoveryModule() {
         service = new LRAService();
@@ -55,48 +55,72 @@ public class LRARecoveryModule implements RecoveryModule,
         _transactionStatusConnectionMgr = new TransactionStatusConnectionManager();
         Implementations.install();
 
-        // Initialize HA components if available
-        initializeHAComponents();
+        // HA initialization is deferred to ensureHAInitialized() because this
+        // constructor runs on a ServerService thread during deployment, before
+        // CDI has finished processing the WAR's bean archives. Attempting
+        // CDI.current().select(LRAStore.class) at this point fails with an
+        // UnsatisfiedResolutionException because the InfinispanStore bean
+        // (in WEB-INF/lib/coordinator-ha-infinispan.jar) hasn't been
+        // discovered yet.
     }
 
     /**
-     * Initializes HA components if HA mode is explicitly enabled via the
-     * {@code lra.coordinator.ha.enabled} system property.
+     * Ensures HA components are initialized exactly once. This is called
+     * lazily (not from the constructor) because the constructor runs on a
+     * WildFly ServerService thread during deployment, before CDI has
+     * finished discovering beans in the WAR's library JARs.
+     */
+    private void ensureHAInitialized() {
+        if (!"true".equalsIgnoreCase(System.getProperty("lra.coordinator.ha.enabled", "false"))) {
+            return;
+        }
+        if (haInitAttempted) {
+            return;
+        }
+        synchronized (this) {
+            if (haInitAttempted) {
+                return;
+            }
+            // initializeHAComponents sets haInitAttempted = true only when
+            // initialization succeeds. If CDI beans are not yet available
+            // (e.g. called during deployment before bean discovery completes),
+            // haInitAttempted stays false so the next call retries.
+            initializeHAComponents();
+        }
+    }
+
+    /**
+     * Initializes HA components by looking up CDI beans (LRAStore,
+     * ClusterCoordinationService). Only called when HA mode is enabled — the
+     * caller ({@link #ensureHAInitialized()}) guards on the system property.
      *
      * <p>
-     * The configuration property is the single source of truth: if it is not
-     * set to {@code true}, no CDI lookups for HA beans are attempted. This
-     * avoids unnecessary bean instantiation (and potential classpath issues)
-     * for developers who do not use the HA feature.
+     * Sets {@code haInitAttempted = true} only on success. If CDI beans are
+     * not yet available (e.g. during early deployment), returns without
+     * setting the flag so that the next call retries.
      * </p>
      */
     private void initializeHAComponents() {
-        // Configuration property is the single source of truth
-        String haEnabledProp = System.getProperty("lra.coordinator.ha.enabled", "false");
-        if (!"true".equalsIgnoreCase(haEnabledProp)) {
-            LRALogger.logger.debug("HA mode disabled (lra.coordinator.ha.enabled != true), "
-                    + "running in single-instance mode");
-            return;
-        }
-
         try {
             // Try to get CDI container
             CDI<Object> cdi = CDI.current();
 
             // Try to get HA components from CDI
             this.lraStore = tryGetBean(cdi, LRAStore.class);
-            this.lockManager = tryGetBean(cdi, LockManager.class);
             this.clusterCoordinator = tryGetBean(cdi, ClusterCoordinationService.class);
 
             if (lraStore == null) {
-                LRALogger.logger.error("HA mode is enabled (lra.coordinator.ha.enabled=true) "
-                        + "but LRAStore bean is not available. Check that the Infinispan "
-                        + "dependencies are on the classpath and CDI is properly configured.");
+                // Bean not available yet — this is expected when called during
+                // deployment before CDI has finished processing bean archives.
+                // Leave haInitAttempted false so the next call retries.
+                LRALogger.logger.warn("HA mode is enabled (lra.coordinator.ha.enabled=true) "
+                        + "but LRAStore bean is not available yet. "
+                        + "Will retry on next access.");
                 return;
             }
 
             this.haEnabled = true;
-            service.initializeHA(lraStore, lockManager, clusterCoordinator);
+            service.initializeHA(lraStore, clusterCoordinator);
 
             // Register for cluster coordinator change notifications
             if (clusterCoordinator != null && clusterCoordinator.isInitialized()) {
@@ -115,13 +139,15 @@ public class LRARecoveryModule implements RecoveryModule,
                         "LRARecoveryModule: no cluster coordinator available, assuming recovery leadership");
             }
 
+            haInitAttempted = true;
             LRALogger.logger.info("LRARecoveryModule initialized with HA components");
         } catch (IllegalStateException e) {
-            // CDI not available - HA was requested but cannot be fulfilled
-            LRALogger.logger.error("HA mode is enabled but CDI is not available. "
-                    + "HA components cannot be initialized.");
+            // CDI not available yet — leave haInitAttempted false to retry later
+            LRALogger.logger.warn("HA mode is enabled but CDI is not available yet. "
+                    + "Will retry on next access.");
         } catch (Exception e) {
-            LRALogger.logger.error("HA mode is enabled but initialization failed", e);
+            // Unexpected failure — leave haInitAttempted false to retry later
+            LRALogger.logger.warn("HA mode is enabled but initialization failed, will retry on next access", e);
         }
     }
 
@@ -138,7 +164,9 @@ public class LRARecoveryModule implements RecoveryModule,
     }
 
     public static LRAService getService() {
-        return getInstance().service; // this call triggers the creation of the LRARecoveryModule singleton which contains service
+        LRARecoveryModule instance = getInstance();
+        instance.ensureHAInitialized();
+        return instance.service;
     }
 
     public static LRARecoveryModule getInstance() {
@@ -185,6 +213,8 @@ public class LRARecoveryModule implements RecoveryModule,
      * In HA mode, only the cluster coordinator performs recovery to avoid conflicts.
      */
     public void periodicWorkSecondPass() {
+        ensureHAInitialized();
+
         if (LRALogger.logger.isTraceEnabled()) {
             LRALogger.logger.trace("LRARecoveryModule: second pass");
         }
@@ -256,7 +286,9 @@ public class LRARecoveryModule implements RecoveryModule,
 
     /**
      * Recovers LRAs from distributed store (HA mode).
-     * Uses distributed locks to coordinate recovery across cluster.
+     * Uses CAS (compare-and-swap) to coordinate recovery across cluster.
+     * Each node "claims" an LRA by CAS-writing with an incremented version;
+     * if another node already claimed it, the CAS fails and we skip it.
      */
     private void recoverTransactionsFromDistributedStore() {
         if (LRALogger.logger.isDebugEnabled()) {
@@ -275,50 +307,34 @@ public class LRARecoveryModule implements RecoveryModule,
             }
 
             int recoveryCount = 0;
-            int lockedCount = 0;
+            int skippedCount = 0;
 
-            // Iterate over all recovering LRAs
             for (io.narayana.lra.coordinator.domain.model.LRAState state : recoveringLRAs) {
                 URI lraId = state.getId();
 
-                // Try to acquire distributed lock (with short timeout to avoid blocking)
-                LockManager.LockHandle lockHandle = null;
-                if (lockManager != null) {
-                    lockHandle = lockManager.acquireLock(lraId, 100,
-                            java.util.concurrent.TimeUnit.MILLISECONDS);
-                    if (lockHandle == null) {
-                        // Another node is recovering this LRA
-                        lockedCount++;
-                        if (LRALogger.logger.isTraceEnabled()) {
-                            LRALogger.logger.tracef(
-                                    "LRARecoveryModule: Skipping LRA %s (locked by another node)", lraId);
-                        }
-                        continue;
-                    }
-                }
-
                 try {
-                    // Recover this LRA
-                    doRecoverTransactionFromState(lraId, state);
+                    // "Claim" this LRA by CAS-writing with incremented version.
+                    // If another node already claimed it, saveOrFail throws
+                    // StaleStateException and we skip it.
+                    LRAState claimed = lraStore.saveOrFail(lraId, state, state.getVersion());
+                    doRecoverTransactionFromState(lraId, claimed);
                     recoveryCount++;
+                } catch (StaleStateException e) {
+                    // Another node claimed it — skip
+                    skippedCount++;
+                    if (LRALogger.logger.isTraceEnabled()) {
+                        LRALogger.logger.tracef(
+                                "LRARecoveryModule: Skipping LRA %s (claimed by another node)", lraId);
+                    }
                 } catch (Exception e) {
                     LRALogger.logger.warnf(e, "Error recovering LRA %s from distributed store", lraId);
-                } finally {
-                    // Release distributed lock
-                    if (lockHandle != null) {
-                        try {
-                            lockHandle.release();
-                        } catch (Exception e) {
-                            LRALogger.logger.warnf(e, "Error releasing lock for LRA %s", lraId);
-                        }
-                    }
                 }
             }
 
             if (LRALogger.logger.isDebugEnabled()) {
                 LRALogger.logger.debugf(
-                        "LRARecoveryModule: Recovered %d LRAs from distributed store (%d skipped - locked by other nodes)",
-                        recoveryCount, lockedCount);
+                        "LRARecoveryModule: Recovered %d LRAs from distributed store (%d skipped - claimed by other nodes)",
+                        recoveryCount, skippedCount);
             }
 
         } catch (Exception e) {
@@ -365,10 +381,10 @@ public class LRARecoveryModule implements RecoveryModule,
 
                     // Move to the recovering cache so that
                     // recoverTransactionsFromDistributedStore() picks it up.
-                    // That path acquires distributed locks and calls
-                    // restore_state() which handles the actual cancellation.
-                    lraStore.moveToRecovering(lraId, state);
-                    movedCount++;
+                    // Uses CAS — if another node already moved it, we skip.
+                    if (lraStore.moveToRecovering(lraId, state, state.getVersion())) {
+                        movedCount++;
+                    }
 
                     if (LRALogger.logger.isDebugEnabled()) {
                         LRALogger.logger.debugf(

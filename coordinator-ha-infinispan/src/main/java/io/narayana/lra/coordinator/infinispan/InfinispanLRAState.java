@@ -10,6 +10,7 @@ import com.arjuna.ats.arjuna.state.InputObjectState;
 import io.narayana.lra.LRAConstants;
 import io.narayana.lra.coordinator.domain.model.LRAState;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
+import java.io.Serializable;
 import java.net.URI;
 import java.time.LocalDateTime;
 import org.eclipse.microprofile.lra.annotation.LRAStatus;
@@ -21,15 +22,17 @@ import org.infinispan.protostream.annotations.ProtoField;
  *
  * <p>
  * This class carries the {@code @ProtoField} and {@code @ProtoFactory}
- * annotations required for Infinispan cache serialization, keeping the
- * coordinator module free from any Infinispan dependency.
+ * annotations required for Infinispan cache serialization (embedded mode),
+ * and implements {@link Serializable} for WildFly's JBoss Marshalling (subsystem mode).
  * </p>
  *
  * <p>
  * This class is immutable and thread-safe.
  * </p>
  */
-public class InfinispanLRAState implements LRAState {
+public class InfinispanLRAState implements LRAState, Serializable {
+
+    private static final long serialVersionUID = 1L;
 
     private final URI id;
     private final URI parentId;

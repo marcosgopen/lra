@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+   Copyright The Narayana Authors
+   SPDX short identifier: Apache-2.0
+  -->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.jboss.narayana.lra</groupId>
+    <artifactId>lra-test</artifactId>
+    <version>1.1.1.Final-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>lra-test-ha</artifactId>
+  <name>LRA tests: HA Clustering</name>
+  <description>LRA High Availability clustering integration tests with WildFly and Infinispan</description>
+
+  <properties>
+    <!-- Default: run only fast component tests. Profiles override to select different suites. -->
+    <ha.test.includes>**/HAClusteringIT.java</ha.test.includes>
+    <ha.test.timeout>300</ha.test.timeout>
+    <!-- HA tests manage their own containers; disable the parent's wildfly-maven-plugin -->
+    <skip.wildfly.plugin>true</skip.wildfly.plugin>
+    <wildfly.config>standalone-ha.xml</wildfly.config>
+  </properties>
+
+  <dependencies>
+    <!-- LRA Coordinator -->
+    <dependency>
+      <groupId>org.jboss.narayana.lra</groupId>
+      <artifactId>lra-coordinator-jar</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <!-- LRA Coordinator HA Infinispan (for HAClusteringIT component tests) -->
+    <dependency>
+      <groupId>org.jboss.narayana.lra</groupId>
+      <artifactId>lra-coordinator-ha-infinispan</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- Infinispan for testing -->
+    <dependency>
+      <groupId>org.infinispan</groupId>
+      <artifactId>infinispan-core</artifactId>
+      <version>${version.org.infinispan}</version>
+    </dependency>
+
+    <!-- Jakarta EE APIs -->
+    <dependency>
+      <groupId>jakarta.enterprise</groupId>
+      <artifactId>jakarta.enterprise.cdi-api</artifactId>
+    </dependency>
+
+    <!-- Arquillian test framework -->
+    <dependency>
+      <groupId>org.jboss.arquillian.junit5</groupId>
+      <artifactId>arquillian-junit5-container</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.wildfly.arquillian</groupId>
+      <artifactId>wildfly-arquillian-container-managed</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- JUnit 5 -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- LRA Client for programmatic LRA operations in tests -->
+    <dependency>
+      <groupId>org.jboss.narayana.lra</groupId>
+      <artifactId>lra-client</artifactId>
+      <version>${project.version}</version>
+      <scope>compile</scope>
+    </dependency>
+
+    <!-- REST client for testing -->
+    <dependency>
+      <groupId>org.jboss.resteasy</groupId>
+      <artifactId>resteasy-client</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.jboss.resteasy</groupId>
+      <artifactId>resteasy-jackson2-provider</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- ShrinkWrap Maven Resolver for building coordinator WAR deployments -->
+    <dependency>
+      <groupId>org.jboss.shrinkwrap.resolver</groupId>
+      <artifactId>shrinkwrap-resolver-impl-maven</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.jboss.shrinkwrap.resolver</groupId>
+      <artifactId>shrinkwrap-resolver-impl-maven-archive</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-install-plugin</artifactId>
+        <configuration>
+          <skip>true</skip>
+        </configuration>
+      </plugin>
+
+      <!-- Disable the parent's wildfly-maven-plugin; HA tests manage containers via Arquillian -->
+      <plugin>
+        <groupId>org.wildfly.plugins</groupId>
+        <artifactId>wildfly-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>start</id>
+            <phase>none</phase>
+          </execution>
+          <execution>
+            <id>deploy-coordinator</id>
+            <phase>none</phase>
+          </execution>
+          <execution>
+            <id>undeploy-coordinator</id>
+            <phase>none</phase>
+          </execution>
+          <execution>
+            <id>shutdown</id>
+            <phase>none</phase>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Configure LRA Infinispan caches and create per-node server base directories -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <executions>
+          <!-- Step 1: Run offline CLI to add LRA cache container to standalone-ha.xml.
+               Uses embed-server so no running WildFly instance is needed.
+               This modifies the config in JBOSS_HOME BEFORE copying to node dirs. -->
+          <execution>
+            <id>configure-lra-caches</id>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <phase>pre-integration-test</phase>
+            <configuration>
+              <target>
+                <exec executable="${env.JBOSS_HOME}/bin/jboss-cli.sh" failonerror="true">
+                  <env key="JBOSS_HOME" value="${env.JBOSS_HOME}"></env>
+                  <arg value="--file=${project.basedir}/src/test/resources/configure-lra-caches.cli"></arg>
+                </exec>
+              </target>
+            </configuration>
+          </execution>
+
+          <!-- Step 2: Copy the (now-modified) configuration to per-node directories -->
+          <execution>
+            <id>prepare-ha-nodes</id>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <phase>pre-integration-test</phase>
+            <configuration>
+              <target>
+                <copy todir="${project.build.directory}/wildfly-node1/configuration">
+                  <fileset dir="${env.JBOSS_HOME}/standalone/configuration"></fileset>
+                </copy>
+                <mkdir dir="${project.build.directory}/wildfly-node1/deployments"></mkdir>
+                <copy todir="${project.build.directory}/wildfly-node2/configuration">
+                  <fileset dir="${env.JBOSS_HOME}/standalone/configuration"></fileset>
+                </copy>
+                <mkdir dir="${project.build.directory}/wildfly-node2/deployments"></mkdir>
+                <copy todir="${project.build.directory}/wildfly-node3/configuration">
+                  <fileset dir="${env.JBOSS_HOME}/standalone/configuration"></fileset>
+                </copy>
+                <mkdir dir="${project.build.directory}/wildfly-node3/deployments"></mkdir>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+            <configuration>
+              <!-- Override the root POM's skipITs=true so HA tests always run -->
+              <skipITs>false</skipITs>
+              <systemPropertyVariables>
+                <arquillian.xml>arquillian-wildfly.xml</arquillian.xml>
+                <wildfly.home>${env.JBOSS_HOME}</wildfly.home>
+                <lra.coordinator.ha.enabled>true</lra.coordinator.ha.enabled>
+                <project.version>${project.version}</project.version>
+                <project.build.directory>${project.build.directory}</project.build.directory>
+                <version.microprofile.lra>${version.microprofile.lra}</version.microprofile.lra>
+              </systemPropertyVariables>
+              <!-- Test selection controlled by ha.test.includes property -->
+              <!-- Default: HAClusteringIT only. Profiles override for other suites. -->
+              <includes>
+                <include>${ha.test.includes}</include>
+              </includes>
+              <forkedProcessTimeoutInSeconds>${ha.test.timeout}</forkedProcessTimeoutInSeconds>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <!-- Kept for backward compatibility; the main build section now handles
+         wildfly-maven-plugin disabling and skipITs override -->
+    <profile>
+      <id>arq</id>
+    </profile>
+
+    <!-- Profile for running multi-node cluster tests (requires WildFly) -->
+    <profile>
+      <id>ha-cluster-tests</id>
+      <properties>
+        <ha.test.includes>**/MultiNodeClusterIT.java</ha.test.includes>
+      </properties>
+    </profile>
+
+    <!-- Profile for running failure scenario tests (requires WildFly) -->
+    <profile>
+      <id>ha-failure-tests</id>
+      <properties>
+        <ha.test.includes>**/FailureScenarioIT.java</ha.test.includes>
+        <ha.test.timeout>600</ha.test.timeout>
+      </properties>
+    </profile>
+
+    <!-- Profile for running data consistency tests (requires WildFly) -->
+    <profile>
+      <id>ha-consistency-tests</id>
+      <properties>
+        <ha.test.includes>**/DataConsistencyIT.java</ha.test.includes>
+      </properties>
+    </profile>
+
+    <!-- Profile for running performance tests (requires WildFly) -->
+    <profile>
+      <id>ha-performance-tests</id>
+      <properties>
+        <ha.test.includes>**/PerformanceIT.java</ha.test.includes>
+        <ha.test.timeout>900</ha.test.timeout>
+      </properties>
+    </profile>
+
+    <!-- Profile for running ALL HA tests (comprehensive suite, requires WildFly) -->
+    <profile>
+      <id>ha-full-suite</id>
+      <properties>
+        <ha.test.includes>**/*IT.java</ha.test.includes>
+        <ha.test.timeout>1200</ha.test.timeout>
+      </properties>
+    </profile>
+  </profiles>
+
+</project>

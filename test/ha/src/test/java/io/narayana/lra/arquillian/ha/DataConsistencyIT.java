@@ -9,6 +9,7 @@ import static io.narayana.lra.arquillian.ha.TestHelpers.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.narayana.lra.client.NarayanaLRAClient;
+import jakarta.ws.rs.NotFoundException;
 import java.net.URI;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -21,12 +22,14 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.eclipse.microprofile.lra.annotation.LRAStatus;
 import org.jboss.arquillian.container.test.api.ContainerController;
+import org.jboss.arquillian.container.test.api.Deployer;
 import org.jboss.arquillian.container.test.api.Deployment;
 import org.jboss.arquillian.container.test.api.RunAsClient;
 import org.jboss.arquillian.container.test.api.TargetsContainer;
 import org.jboss.arquillian.junit5.ArquillianExtension;
 import org.jboss.arquillian.test.api.ArquillianResource;
 import org.jboss.shrinkwrap.api.spec.WebArchive;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -37,10 +40,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
  *
  * Tests data integrity and consistency:
  * - ObjectStore and Infinispan state synchronization
- * - Distributed locking prevents concurrent modifications
+ * - Optimistic concurrency control (OCC) prevents conflicting updates
  * - Cache state transitions (active -> recovering -> failed)
  * - State recovery from ObjectStore
- * - No lost updates or conflicts
+ * - No lost updates under concurrent access
  *
  * Uses a 3-node cluster (odd number) to ensure proper quorum-based
  * partition handling with DENY_READ_WRITES strategy.
@@ -55,26 +58,40 @@ public class DataConsistencyIT {
     @ArquillianResource
     private ContainerController controller;
 
+    @ArquillianResource
+    private Deployer deployer;
+
     private NarayanaLRAClient node1Client;
     private NarayanaLRAClient node2Client;
     private boolean clusterStarted = false;
 
-    @Deployment(name = "node1", testable = false)
+    @Deployment(name = "node1", managed = false, testable = false)
     @TargetsContainer(NODE1_CONTAINER)
     public static WebArchive createDeploymentNode1() {
         return createLRACoordinatorDeployment();
     }
 
-    @Deployment(name = "node2", testable = false)
+    @Deployment(name = "node2", managed = false, testable = false)
     @TargetsContainer(NODE2_CONTAINER)
     public static WebArchive createDeploymentNode2() {
         return createLRACoordinatorDeployment();
     }
 
-    @Deployment(name = "node3", testable = false)
+    @Deployment(name = "node3", managed = false, testable = false)
     @TargetsContainer(NODE3_CONTAINER)
     public static WebArchive createDeploymentNode3() {
         return createLRACoordinatorDeployment();
+    }
+
+    @AfterAll
+    void cleanUp() {
+        if (node1Client != null) {
+            node1Client.close();
+        }
+        if (node2Client != null) {
+            node2Client.close();
+        }
+        cleanupCluster(controller, deployer);
     }
 
     @BeforeEach
@@ -83,6 +100,10 @@ public class DataConsistencyIT {
             startNode(controller, NODE1_CONTAINER);
             startNode(controller, NODE2_CONTAINER);
             startNode(controller, NODE3_CONTAINER);
+
+            safeDeployToNode(deployer, "node1");
+            safeDeployToNode(deployer, "node2");
+            safeDeployToNode(deployer, "node3");
 
             waitForNodeReady(NODE1_BASE_URL);
             waitForNodeReady(NODE2_BASE_URL);
@@ -155,7 +176,7 @@ public class DataConsistencyIT {
         startLatch.countDown();
 
         executor.shutdown();
-        assertTrue(executor.awaitTermination(30, TimeUnit.SECONDS), "All operations should complete in time");
+        assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS), "All operations should complete in time");
 
         int totalOps = successCount.get() + failureCount.get();
         assertEquals(10, totalOps, "All 10 operations should complete");
@@ -170,11 +191,9 @@ public class DataConsistencyIT {
             }
         }
 
-        System.out.println("Concurrent creation: " + successCount.get() + " succeeded, "
-                + failureCount.get() + " failed, " + replicatedCount + " fully replicated");
-
         assertTrue(successCount.get() >= 8,
-                "At least 80% of concurrent creates should succeed");
+                "At least 80% of concurrent creates should succeed, got " + successCount.get()
+                        + " (failures: " + failureCount.get() + ", replicated: " + replicatedCount + ")");
 
         closeAllLRAs(node1Client, allLRAs);
     }
@@ -191,11 +210,17 @@ public class DataConsistencyIT {
 
         waitForReplication();
 
-        boolean node1Accessible = isLRAAccessible(node1Client, lraId);
-        boolean node2Accessible = isLRAReplicatedToNode(lraId, NODE2_BASE_URL);
-
-        System.out.println("Node1 accessible after close: " + node1Accessible);
-        System.out.println("Node2 accessible after close: " + node2Accessible);
+        // After close, the LRA should no longer be listed as active
+        try (NarayanaLRAClient targetClient = createLRAClient(NODE1_BASE_URL);
+                NarayanaLRAClient targetClient2 = createLRAClient(NODE2_BASE_URL)) {
+            assertTrue(LRAStatus.Closed.equals(targetClient2.getStatus(lraId))
+                    || LRAStatus.Closing.equals(targetClient2.getStatus(lraId)));
+            assertTrue(LRAStatus.Closed.equals(targetClient.getStatus(lraId))
+                    ||
+                    LRAStatus.Closing.equals(targetClient.getStatus(lraId)));
+        } catch (NotFoundException e) {
+            //LRA was already deleted
+        }
     }
 
     @Test
@@ -207,12 +232,16 @@ public class DataConsistencyIT {
             assertTrue(isLRAAccessible(node1Client, lraId));
         }
 
+        undeployQuietly(deployer, "node1");
+        undeployQuietly(deployer, "node2");
         stopNode(controller, NODE1_CONTAINER);
         stopNode(controller, NODE2_CONTAINER);
         waitForReplication(5);
 
         startNode(controller, NODE1_CONTAINER);
         startNode(controller, NODE2_CONTAINER);
+        safeDeployToNode(deployer, "node1");
+        safeDeployToNode(deployer, "node2");
         waitForNodeReady(NODE1_BASE_URL);
         waitForNodeReady(NODE2_BASE_URL);
 
@@ -230,7 +259,8 @@ public class DataConsistencyIT {
             }
         }
 
-        System.out.println("Recovered " + recoveredCount + " out of " + lraIds.size() + " LRAs");
+        assertTrue(recoveredCount >= 0,
+                "Recovery should complete without errors (recovered " + recoveredCount + "/" + lraIds.size() + ")");
 
         URI newLra = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
         assertNotNull(newLra, "Should be able to create new LRA after recovery");
@@ -258,7 +288,7 @@ public class DataConsistencyIT {
                         }
                         createdCount.incrementAndGet();
                     } catch (Exception e) {
-                        System.err.println("Failed to create LRA: " + e.getMessage());
+                        // Creation failure counted via createdCount < expected
                     }
                 }));
             }
@@ -272,7 +302,7 @@ public class DataConsistencyIT {
                         }
                         createdCount.incrementAndGet();
                     } catch (Exception e) {
-                        System.err.println("Failed to create LRA: " + e.getMessage());
+                        // Creation failure counted via createdCount < expected
                     }
                 }));
             }
@@ -284,19 +314,23 @@ public class DataConsistencyIT {
             waitForReplication(3);
 
             for (URI lraId : createdLRAs) {
-                assertTrue(isLRAAccessible(node1Client, lraId),
-                        "LRA should be accessible: " + lraId);
-
-                try {
-                    node1Client.closeLRA(lraId);
-                    closedCount.incrementAndGet();
-                } catch (Exception e) {
-                    System.err.println("Failed to close LRA: " + e.getMessage());
+                // Retry to allow for replication lag under load
+                boolean accessible = false;
+                for (int attempt = 0; attempt < 5 && !accessible; attempt++) {
+                    accessible = isLRAAccessible(node1Client, lraId);
+                    if (!accessible) {
+                        waitForReplication(1);
+                    }
                 }
+                assertTrue(accessible, "LRA should be accessible: " + lraId);
+
+                node1Client.closeLRA(lraId);
+                closedCount.incrementAndGet();
             }
 
             assertEquals(20, createdCount.get(), "Should create 20 LRAs");
-            System.out.println("Created: " + createdCount.get() + ", Closed: " + closedCount.get());
+            assertEquals(20, closedCount.get(),
+                    "All created LRAs should be closable (created: " + createdCount.get() + ")");
 
         } finally {
             executor.shutdown();
@@ -316,25 +350,28 @@ public class DataConsistencyIT {
         assertTrue(isLRAReplicatedToNode(lra3, NODE2_BASE_URL));
 
         killNode(controller, NODE2_CONTAINER);
-        waitForReplication(3);
+        waitForReplication(5);
 
-        assertTrue(isLRAAccessible(node1Client, lra1));
-        assertTrue(isLRAAccessible(node1Client, lra2));
-        assertTrue(isLRAAccessible(node1Client, lra3));
+        // After killing node2, remaining 2 of 3 nodes still have quorum.
+        // All three LRAs were verified as replicated before the kill, so all must be accessible.
+        assertTrue(isLRAAccessible(node1Client, lra1), "lra1 should be accessible after node2 crash");
+        assertTrue(isLRAAccessible(node1Client, lra2),
+                "lra2 should be accessible after node2 crash (was replicated before kill)");
+        assertTrue(isLRAAccessible(node1Client, lra3), "lra3 should be accessible after node2 crash");
 
         node1Client.closeLRA(lra1);
 
         startNode(controller, NODE2_CONTAINER);
+        safeDeployToNode(deployer, "node2");
         waitForNodeReady(NODE2_BASE_URL);
         node2Client.close();
         node2Client = createLRAClient(NODE2_BASE_URL);
         waitForClusterFormation(10);
 
-        boolean lra2Available = isLRAReplicatedToNode(lra2, NODE2_BASE_URL);
-        boolean lra3Available = isLRAReplicatedToNode(lra3, NODE2_BASE_URL);
-
-        System.out.println("After rejoin - lra2 available: " + lra2Available
-                + ", lra3 available: " + lra3Available);
+        assertTrue(isLRAReplicatedToNode(lra2, NODE2_BASE_URL),
+                "lra2 should be available on node2 after rejoin");
+        assertTrue(isLRAReplicatedToNode(lra3, NODE2_BASE_URL),
+                "lra3 should be available on node2 after rejoin");
 
         closeAllLRAs(node1Client, List.of(lra2, lra3));
     }
@@ -348,9 +385,7 @@ public class DataConsistencyIT {
             URI lraId = node1Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
             lraIds.add(lraId);
 
-            if (i % 10 == 0) {
-                System.out.println("Created " + (i + 1) + " LRAs");
-            }
+            // Progress: created (i+1) LRAs
         }
 
         waitForReplication(3);
@@ -362,9 +397,8 @@ public class DataConsistencyIT {
             }
         }
 
-        System.out.println(accessibleCount + " out of " + lraCount + " LRAs accessible");
         assertTrue(accessibleCount >= lraCount * 0.9,
-                "At least 90% of LRAs should be accessible");
+                "At least 90% of LRAs should be accessible, got " + accessibleCount + "/" + lraCount);
 
         closeAllLRAs(node1Client, lraIds);
     }

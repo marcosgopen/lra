@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.narayana.lra.client.NarayanaLRAClient;
 import java.net.URI;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
 import org.jboss.arquillian.container.test.api.ContainerController;
 import org.jboss.arquillian.container.test.api.Deployer;
 import org.jboss.arquillian.container.test.api.Deployment;
@@ -19,6 +20,7 @@ import org.jboss.arquillian.container.test.api.TargetsContainer;
 import org.jboss.arquillian.junit5.ArquillianExtension;
 import org.jboss.arquillian.test.api.ArquillianResource;
 import org.jboss.shrinkwrap.api.spec.WebArchive;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -68,6 +70,17 @@ public class MultiNodeClusterIT {
         return createLRACoordinatorDeployment();
     }
 
+    @AfterAll
+    void cleanUp() {
+        if (node1Client != null) {
+            node1Client.close();
+        }
+        if (node2Client != null) {
+            node2Client.close();
+        }
+        cleanupCluster(controller, deployer);
+    }
+
     @BeforeEach
     void setUp() {
         if (!clusterStarted) {
@@ -75,9 +88,9 @@ public class MultiNodeClusterIT {
             startNode(controller, NODE2_CONTAINER);
             startNode(controller, NODE3_CONTAINER);
 
-            deployer.deploy("node1");
-            deployer.deploy("node2");
-            deployer.deploy("node3");
+            safeDeployToNode(deployer, "node1");
+            safeDeployToNode(deployer, "node2");
+            safeDeployToNode(deployer, "node3");
 
             waitForNodeReady(NODE1_BASE_URL);
             waitForNodeReady(NODE2_BASE_URL);
@@ -110,34 +123,19 @@ public class MultiNodeClusterIT {
     }
 
     @Test
-    void testCreateLRAOnNode2AndRetrieveFromNode1() throws Exception {
-        URI lraId = node2Client.startLRA(null, "ha-test", 0L, ChronoUnit.SECONDS);
-        assertNotNull(lraId);
-
-        waitForReplication();
-
-        assertTrue(isLRAReplicatedToNode(lraId, NODE1_BASE_URL),
-                "LRA created on node2 should be visible from node1");
-
-        node2Client.closeLRA(lraId);
-    }
-
-    @Test
     void testMultipleConcurrentLRAs() throws Exception {
         int lraCount = 5;
-        java.util.List<URI> node1Lras = startMultipleLRAs(node1Client, lraCount);
-        java.util.List<URI> node2Lras = startMultipleLRAs(node2Client, lraCount);
+        List<URI> node1Lras = startMultipleLRAs(node1Client, lraCount);
+        List<URI> node2Lras = startMultipleLRAs(node2Client, lraCount);
 
         waitForReplication(3);
 
         for (URI lraId : node1Lras) {
-            assertTrue(isLRAAccessible(node1Client, lraId),
-                    "LRA created on node1 should be accessible");
+            assertTrue(isLRAAccessible(node2Client, lraId), "LRA created on node1 should be accessible from node2");
         }
 
         for (URI lraId : node2Lras) {
-            assertTrue(isLRAAccessible(node2Client, lraId),
-                    "LRA created on node2 should be accessible");
+            assertTrue(isLRAAccessible(node1Client, lraId), "LRA created on node2 should be accessible from node1");
         }
 
         closeAllLRAs(node1Client, node1Lras);
@@ -160,21 +158,13 @@ public class MultiNodeClusterIT {
         String[] segments1 = lra1.getPath().split("/");
         String[] segments2 = lra2.getPath().split("/");
 
-        System.out.println("Node1 LRA path: " + lra1.getPath());
-        System.out.println("Node2 LRA path: " + lra2.getPath());
+        assertTrue(segments1.length >= 3,
+                "LRA ID from node1 should have valid path structure: " + lra1.getPath());
+        assertTrue(segments2.length >= 3,
+                "LRA ID from node2 should have valid path structure: " + lra2.getPath());
+        assertNotEquals(lra1, lra2, "LRA IDs from different nodes should be unique");
 
-        assertTrue(segments1.length >= 3, "LRA ID from node1 should have valid path structure");
-        assertTrue(segments2.length >= 3, "LRA ID from node2 should have valid path structure");
-
-        try {
-            node1Client.closeLRA(lra1);
-        } catch (Exception e) {
-            System.err.println("Cleanup: failed to close lra1: " + e.getMessage());
-        }
-        try {
-            node2Client.closeLRA(lra2);
-        } catch (Exception e) {
-            System.err.println("Cleanup: failed to close lra2: " + e.getMessage());
-        }
+        closeAllLRAs(node1Client, List.of(lra1));
+        closeAllLRAs(node2Client, List.of(lra2));
     }
 }

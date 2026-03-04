@@ -270,6 +270,15 @@
       </properties>
     </profile>
 
+    <!-- Profile for running OCC consistency tests (requires WildFly) -->
+    <profile>
+      <id>ha-occ-tests</id>
+      <properties>
+        <ha.test.includes>**/OccConsistencyIT.java</ha.test.includes>
+        <ha.test.timeout>600</ha.test.timeout>
+      </properties>
+    </profile>
+
     <!-- Profile for running ALL HA tests (comprehensive suite, requires WildFly) -->
     <profile>
       <id>ha-full-suite</id>

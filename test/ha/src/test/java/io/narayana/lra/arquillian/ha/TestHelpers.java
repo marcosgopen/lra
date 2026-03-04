@@ -5,14 +5,18 @@
 
 package io.narayana.lra.arquillian.ha;
 
+import io.narayana.lra.LRAConstants;
+import io.narayana.lra.LRAData;
 import io.narayana.lra.client.NarayanaLRAClient;
 import java.net.URI;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import org.eclipse.microprofile.lra.annotation.LRAStatus;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.jboss.arquillian.container.test.api.ContainerController;
+import org.jboss.arquillian.container.test.api.Deployer;
 import org.jboss.shrinkwrap.api.ShrinkWrap;
 import org.jboss.shrinkwrap.api.asset.EmptyAsset;
 import org.jboss.shrinkwrap.api.asset.StringAsset;
@@ -28,6 +32,8 @@ import org.jboss.shrinkwrap.resolver.api.maven.Maven;
  * - Metrics collection
  */
 public class TestHelpers {
+
+    private static final Logger LOG = Logger.getLogger(TestHelpers.class.getName());
 
     public static final String NODE1_CONTAINER = "wildfly-ha-node1";
     public static final String NODE2_CONTAINER = "wildfly-ha-node2";
@@ -59,10 +65,10 @@ public class TestHelpers {
         while (attempt < maxAttempts) {
             try (NarayanaLRAClient probe = createLRAClient(nodeBaseUrl)) {
                 probe.getAllLRAs();
-                System.out.println("Node ready: " + nodeBaseUrl);
+                LOG.info("Node ready: " + nodeBaseUrl);
                 return;
             } catch (Exception e) {
-                System.out.println("");
+                // Node not ready yet, retrying
                 // Node not ready yet
             }
             attempt++;
@@ -87,14 +93,14 @@ public class TestHelpers {
      * Wait for cluster formation with custom timeout.
      */
     public static void waitForClusterFormation(int timeoutSeconds) {
-        System.out.println("Waiting for cluster formation...");
+        LOG.info("Waiting for cluster formation...");
         try {
             TimeUnit.SECONDS.sleep(timeoutSeconds);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Interrupted while waiting for cluster", e);
         }
-        System.out.println("Cluster formation complete");
+        LOG.info("Cluster formation complete");
     }
 
     /**
@@ -135,18 +141,22 @@ public class TestHelpers {
             try {
                 lraClient.closeLRA(lraId);
             } catch (Exception e) {
-                System.err.println("Failed to close LRA: " + lraId + " - " + e.getMessage());
+                LOG.log(Level.WARNING, "Failed to close LRA: " + lraId, e);
             }
         }
     }
 
     /**
      * Check whether an LRA is accessible via the given client.
+     * Uses getAllLRAs() to query the client's own coordinator (not the LRA's originating node).
+     * Compares by LRA UID to handle the case where different nodes report different host/port in the URI.
      */
     public static boolean isLRAAccessible(NarayanaLRAClient lraClient, URI lraId) {
         try {
-            LRAStatus status = lraClient.getStatus(lraId);
-            return status != null;
+            String targetUid = LRAConstants.getLRAUid(lraId);
+            List<LRAData> allLRAs = lraClient.getAllLRAs();
+            return allLRAs.stream()
+                    .anyMatch(data -> targetUid.equals(LRAConstants.getLRAUid(data.getLraId())));
         } catch (Exception e) {
             return false;
         }
@@ -154,11 +164,16 @@ public class TestHelpers {
 
     /**
      * Check whether an LRA created on one node is visible from another node.
+     * Uses getAllLRAs() to query the target node's coordinator directly,
+     * avoiding the issue where getStatus() routes to the LRA's originating node.
+     * Compares by LRA UID to handle the case where different nodes report different host/port in the URI.
      */
     public static boolean isLRAReplicatedToNode(URI lraId, String targetNodeBaseUrl) {
         try (NarayanaLRAClient targetClient = createLRAClient(targetNodeBaseUrl)) {
-            LRAStatus status = targetClient.getStatus(lraId);
-            return status != null;
+            String targetUid = LRAConstants.getLRAUid(lraId);
+            List<LRAData> allLRAs = targetClient.getAllLRAs();
+            return allLRAs.stream()
+                    .anyMatch(data -> targetUid.equals(LRAConstants.getLRAUid(data.getLraId())));
         } catch (Exception e) {
             return false;
         }
@@ -191,7 +206,9 @@ public class TestHelpers {
                 + "      <module name=\"org.jboss.logging\"/>\n"
                 + "      <module name=\"org.jgroups\"/>\n"
                 + "      <module name=\"org.infinispan\" export=\"true\" services=\"import\"/>\n"
+                + "      <module name=\"org.infinispan.core\" export=\"true\" services=\"import\"/>\n"
                 + "      <module name=\"org.infinispan.commons\"/>\n"
+                + "      <module name=\"org.infinispan.protostream\"/>\n"
                 + "      <module name=\"io.smallrye.stork\"/>\n"
                 + "    </dependencies>\n"
                 + "  </deployment>\n"
@@ -200,6 +217,9 @@ public class TestHelpers {
         // web.xml: resource-env-ref entries for JNDI lookup of WildFly-managed caches.
         // These references trigger WildFly to start the lra cache container and its
         // caches when the deployment is activated.
+        // web.xml: resource-env-ref entries for JNDI lookup of WildFly-managed caches.
+        // Both the cache container AND each individual cache must be referenced —
+        // WildFly only starts caches that are explicitly requested via JNDI.
         String webXml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
                 + "<web-app xmlns=\"https://jakarta.ee/xml/ns/jakartaee\"\n"
                 + "         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n"
@@ -210,6 +230,21 @@ public class TestHelpers {
                 + "    <resource-env-ref-name>infinispan/container/lra</resource-env-ref-name>\n"
                 + "    <resource-env-ref-type>org.infinispan.manager.EmbeddedCacheManager</resource-env-ref-type>\n"
                 + "    <lookup-name>java:jboss/infinispan/container/lra</lookup-name>\n"
+                + "  </resource-env-ref>\n"
+                + "  <resource-env-ref>\n"
+                + "    <resource-env-ref-name>infinispan/cache/lra/lra-active</resource-env-ref-name>\n"
+                + "    <resource-env-ref-type>org.infinispan.Cache</resource-env-ref-type>\n"
+                + "    <lookup-name>java:jboss/infinispan/cache/lra/lra-active</lookup-name>\n"
+                + "  </resource-env-ref>\n"
+                + "  <resource-env-ref>\n"
+                + "    <resource-env-ref-name>infinispan/cache/lra/lra-recovering</resource-env-ref-name>\n"
+                + "    <resource-env-ref-type>org.infinispan.Cache</resource-env-ref-type>\n"
+                + "    <lookup-name>java:jboss/infinispan/cache/lra/lra-recovering</lookup-name>\n"
+                + "  </resource-env-ref>\n"
+                + "  <resource-env-ref>\n"
+                + "    <resource-env-ref-name>infinispan/cache/lra/lra-failed</resource-env-ref-name>\n"
+                + "    <resource-env-ref-type>org.infinispan.Cache</resource-env-ref-type>\n"
+                + "    <lookup-name>java:jboss/infinispan/cache/lra/lra-failed</lookup-name>\n"
                 + "  </resource-env-ref>\n"
                 + "</web-app>\n";
 
@@ -233,13 +268,54 @@ public class TestHelpers {
                 .addAsWebInfResource(EmptyAsset.INSTANCE, "beans.xml");
     }
 
+    // ---- Deployment helpers (lifecycle) ----
+
+    /**
+     * Deploy to a node, undeploying first if already deployed.
+     * Handles the case where a previous test class left a deployment behind.
+     */
+    public static void safeDeployToNode(Deployer deployer, String deploymentName) {
+        try {
+            deployer.undeploy(deploymentName);
+        } catch (Exception e) {
+            // Nothing to undeploy — expected for first deployment
+        }
+        deployer.deploy(deploymentName);
+    }
+
+    /**
+     * Undeploy from a node, ignoring errors if not deployed or container is down.
+     */
+    public static void undeployQuietly(Deployer deployer, String deploymentName) {
+        try {
+            deployer.undeploy(deploymentName);
+        } catch (Exception e) {
+            // Already undeployed or container is down
+        }
+    }
+
+    /**
+     * Clean up all nodes: undeploy WARs, then stop containers.
+     * Call from {@code @AfterAll} to leave a clean state for the next test class.
+     */
+    public static void cleanupCluster(ContainerController controller, Deployer deployer) {
+        // Undeploy from running containers first (order matters)
+        undeployQuietly(deployer, "node1");
+        undeployQuietly(deployer, "node2");
+        undeployQuietly(deployer, "node3");
+        // Then stop containers
+        stopNodeQuietly(controller, NODE1_CONTAINER);
+        stopNodeQuietly(controller, NODE2_CONTAINER);
+        stopNodeQuietly(controller, NODE3_CONTAINER);
+    }
+
     // ---- Container lifecycle helpers ----
 
     /**
      * Start a container node.
      */
     public static void startNode(ContainerController controller, String containerName) {
-        System.out.println("Starting container: " + containerName);
+        LOG.info("Starting container: " + containerName);
         controller.start(containerName);
     }
 
@@ -247,11 +323,11 @@ public class TestHelpers {
      * Stop a container node gracefully.
      */
     public static void stopNode(ContainerController controller, String containerName) {
-        System.out.println("Stopping container: " + containerName);
+        LOG.info("Stopping container: " + containerName);
         try {
             controller.stop(containerName);
         } catch (Exception e) {
-            System.err.println("Error stopping container " + containerName + ": " + e.getMessage());
+            LOG.log(Level.WARNING, "Error stopping container " + containerName, e);
         }
     }
 
@@ -260,14 +336,14 @@ public class TestHelpers {
      * Falls back to stop() if kill() is not supported.
      */
     public static void killNode(ContainerController controller, String containerName) {
-        System.out.println("Killing container: " + containerName);
+        LOG.info("Killing container: " + containerName);
         try {
             controller.kill(containerName);
         } catch (UnsupportedOperationException e) {
-            System.err.println("Kill not supported, falling back to stop for " + containerName);
+            LOG.warning("Kill not supported, falling back to stop for " + containerName);
             stopNode(controller, containerName);
         } catch (Exception e) {
-            System.err.println("Error killing container " + containerName + ": " + e.getMessage());
+            LOG.log(Level.WARNING, "Error killing container " + containerName, e);
         }
     }
 

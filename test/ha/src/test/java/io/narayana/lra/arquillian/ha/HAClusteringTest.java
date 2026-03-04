@@ -115,7 +115,7 @@ public class HAClusteringTest {
                 public boolean isHaEnabled() {
                     return true;
                 }
-            }, null, null);
+            }, null);
 
             String baseUrl = "http://localhost:8080/lra-coordinator";
 
@@ -156,7 +156,7 @@ public class HAClusteringTest {
             System.setProperty("lra.coordinator.node.id", "my-coordinator-1");
 
             LRAService service = new LRAService();
-            service.initializeHA(null, null, null);
+            service.initializeHA(null, null);
 
             // When/Then: Should return the configured value
             assertEquals("my-coordinator-1", service.getNodeId());
@@ -179,7 +179,7 @@ public class HAClusteringTest {
             System.clearProperty("lra.coordinator.node.id");
 
             LRAService service = new LRAService();
-            service.initializeHA(null, null, null);
+            service.initializeHA(null, null);
 
             // When/Then: Should return some value (either HOSTNAME or fallback)
             String nodeId = service.getNodeId();
@@ -240,7 +240,7 @@ public class HAClusteringTest {
             assertFalse(service.isHaEnabled(), "Should be in single-instance mode without initializeHA");
 
             // When: initializeHA is called, even with null store, HA mode is enabled
-            service.initializeHA(null, null, null);
+            service.initializeHA(null, null);
             assertTrue(service.isHaEnabled(),
                     "initializeHA always enables HA mode (store may be set later)");
         } finally {
@@ -268,7 +268,7 @@ public class HAClusteringTest {
                 public boolean isHaEnabled() {
                     return true;
                 }
-            }, null, null);
+            }, null);
 
             String baseUrl = "http://localhost:8080/lra-coordinator";
 
@@ -325,7 +325,7 @@ public class HAClusteringTest {
                     public boolean isHaEnabled() {
                         return true;
                     }
-                }, null, null);
+                }, null);
 
                 String baseUrl = "http://localhost:8080/lra-coordinator";
                 LongRunningAction lra = new LongRunningAction(service, baseUrl, null, "test");

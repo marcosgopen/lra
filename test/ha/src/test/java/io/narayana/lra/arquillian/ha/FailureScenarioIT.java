@@ -31,9 +31,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
  * Tests critical HA failure modes:
  * - Node crashes during operations
  * - Coordinator failover and re-election
- * - Network partition handling
+ * - Network partition handling (DENY_READ_WRITES)
  * - Partition healing and reconciliation
- * - Recovery after failures
+ * - Recovery after failures (CAS-based recovery claiming)
  *
  * Uses a 3-node cluster (odd number) to ensure proper quorum-based
  * partition handling with DENY_READ_WRITES strategy.
@@ -87,9 +87,8 @@ public class FailureScenarioIT {
             node2Client.close();
         }
 
-        stopNodeQuietly(controller, NODE1_CONTAINER);
-        stopNodeQuietly(controller, NODE2_CONTAINER);
-        stopNodeQuietly(controller, NODE3_CONTAINER);
+        // Undeploy before stopping to avoid stale deployments on next start
+        cleanupCluster(controller, deployer);
         deployed = false;
     }
 
@@ -99,9 +98,9 @@ public class FailureScenarioIT {
         startNode(controller, NODE3_CONTAINER);
 
         if (!deployed) {
-            deployer.deploy("node1");
-            deployer.deploy("node2");
-            deployer.deploy("node3");
+            safeDeployToNode(deployer, "node1");
+            safeDeployToNode(deployer, "node2");
+            safeDeployToNode(deployer, "node3");
             deployed = true;
         }
 
@@ -138,7 +137,8 @@ public class FailureScenarioIT {
                 "LRA should be replicated to node2");
 
         killNode(controller, NODE1_CONTAINER);
-        waitForReplication(3);
+        // After a crash, JGroups needs to detect failure + Infinispan rebalances
+        waitForReplication(10);
 
         assertTrue(isLRAReplicatedToNode(lraId, NODE2_BASE_URL),
                 "LRA should still be accessible from node2 after node1 crash");
@@ -155,6 +155,8 @@ public class FailureScenarioIT {
         assertEquals(5, lraIds.size(), "Should create 5 LRAs");
         waitForReplication();
 
+        undeployQuietly(deployer, "node1");
+        undeployQuietly(deployer, "node2");
         stopNode(controller, NODE1_CONTAINER);
         stopNode(controller, NODE2_CONTAINER);
 
@@ -162,6 +164,8 @@ public class FailureScenarioIT {
 
         startNode(controller, NODE1_CONTAINER);
         startNode(controller, NODE2_CONTAINER);
+        safeDeployToNode(deployer, "node1");
+        safeDeployToNode(deployer, "node2");
         waitForNodeReady(NODE1_BASE_URL);
         waitForNodeReady(NODE2_BASE_URL);
         recreateClients();
@@ -230,7 +234,8 @@ public class FailureScenarioIT {
         }
 
         stopNode(controller, NODE1_CONTAINER);
-        waitForReplication(3);
+        // After shutdown, cluster view change + Infinispan rebalance takes time
+        waitForReplication(10);
 
         for (URI lraId : lraIds) {
             assertTrue(isLRAReplicatedToNode(lraId, NODE2_BASE_URL),
@@ -256,6 +261,8 @@ public class FailureScenarioIT {
 
         startNode(controller, NODE1_CONTAINER);
         startNode(controller, NODE2_CONTAINER);
+        safeDeployToNode(deployer, "node1");
+        safeDeployToNode(deployer, "node2");
         waitForNodeReady(NODE1_BASE_URL);
         waitForNodeReady(NODE2_BASE_URL);
         recreateClients();
@@ -282,6 +289,7 @@ public class FailureScenarioIT {
         waitForReplication();
 
         startNode(controller, NODE2_CONTAINER);
+        safeDeployToNode(deployer, "node2");
         waitForNodeReady(NODE2_BASE_URL);
         if (node2Client != null) {
             node2Client.close();
@@ -291,8 +299,8 @@ public class FailureScenarioIT {
 
         for (URI newLraId : newLraIds) {
             waitForReplication(2);
-            boolean accessible = isLRAReplicatedToNode(newLraId, NODE2_BASE_URL);
-            System.out.println("LRA " + newLraId + " accessible from node2: " + accessible);
+            assertTrue(isLRAReplicatedToNode(newLraId, NODE2_BASE_URL),
+                    "LRA created while node2 was down should be replicated after rejoin: " + newLraId);
         }
 
         closeAllLRAs(node1Client, newLraIds);

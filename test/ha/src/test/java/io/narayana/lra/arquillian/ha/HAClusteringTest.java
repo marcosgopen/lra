@@ -24,7 +24,7 @@ import org.junit.jupiter.api.Test;
  * Note: Full multi-node cluster tests require manual WildFly cluster setup
  * and are better suited for system-level integration testing.
  */
-public class HAClusteringIT {
+public class HAClusteringTest {
 
     @Test
     void testInfinispanStoreInitialization() {

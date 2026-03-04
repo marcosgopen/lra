@@ -9,11 +9,11 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import io.narayana.lra.coordinator.domain.model.LRAState;
 import io.narayana.lra.coordinator.domain.service.LRAService;
-import io.narayana.lra.coordinator.internal.LockManager;
+import io.narayana.lra.coordinator.internal.StaleStateException;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.eclipse.microprofile.lra.annotation.LRAStatus;
 import org.infinispan.Cache;
 import org.infinispan.configuration.cache.CacheMode;
@@ -21,7 +21,6 @@ import org.infinispan.configuration.cache.ConfigurationBuilder;
 import org.infinispan.configuration.global.GlobalConfigurationBuilder;
 import org.infinispan.manager.DefaultCacheManager;
 import org.infinispan.manager.EmbeddedCacheManager;
-import org.infinispan.partitionhandling.AvailabilityMode;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,7 +31,7 @@ import org.junit.jupiter.api.Test;
  * Tests:
  * - Multiple coordinators sharing state via Infinispan
  * - Any coordinator can manage any LRA
- * - Distributed locking prevents conflicts
+ * - Optimistic concurrency control (CAS) prevents conflicts
  * - Cache availability modes (AVAILABLE, DEGRADED)
  * - Coordinator failover scenarios
  *
@@ -44,20 +43,17 @@ class HACoordinatorTest {
 
     private EmbeddedCacheManager sharedCacheManager;
     private List<InfinispanStore> stores;
-    private List<InfinispanLockManager> lockManagers;
     private List<LRAService> services;
 
     @BeforeEach
     void setUp() {
         stores = new ArrayList<>();
-        lockManagers = new ArrayList<>();
         services = new ArrayList<>();
     }
 
     @AfterEach
     void tearDown() {
         services.clear();
-        lockManagers.clear();
         stores.clear();
 
         if (sharedCacheManager != null) {
@@ -94,16 +90,11 @@ class HACoordinatorTest {
             // Create InfinispanStore for this node (all backed by the same caches)
             InfinispanStore store = createInfinispanStore(sharedCacheManager);
 
-            // Create InfinispanLockManager
-            InfinispanLockManager lockManager = new InfinispanLockManager();
-            lockManager.initialize(sharedCacheManager);
-
             // Create LRAService
             LRAService service = new LRAService();
-            service.initializeHA(store, lockManager, null);
+            service.initializeHA(store, null);
 
             stores.add(store);
-            lockManagers.add(lockManager);
             services.add(service);
         }
     }
@@ -203,39 +194,69 @@ class HACoordinatorTest {
     }
 
     @Test
-    void testDistributedLockAcquisition() {
+    void testOptimisticConcurrencyControl() {
         // Given: 2-node cluster
         createTestCluster(2);
 
         URI lraId = URI.create("http://localhost:8080/lra-coordinator/test-lra-4");
+        InfinispanLRAState state = createTestLRAState(lraId, LRAStatus.Active);
 
-        // Note: EmbeddedClusteredLockManagerFactory requires JGroups transport,
-        // which is not available in LOCAL mode. In this unit test we verify
-        // that the lock manager API handles this gracefully (returns null
-        // when not initialized, rather than throwing exceptions).
-        InfinispanLockManager lockManager = lockManagers.get(0);
+        // When: Node 0 saves with version 0 (new entry)
+        LRAState saved = stores.get(0).saveOrFail(lraId, state, 0);
+        assertNotNull(saved);
+        assertEquals(1, saved.getVersion(), "Version should be incremented to 1");
 
-        if (lockManager.isInitialized()) {
-            // JGroups transport is available - test actual locking
-            LockManager.LockHandle lock0 = lockManager.acquireLock(lraId, 1, TimeUnit.SECONDS);
-            assertNotNull(lock0);
+        // Then: Node 1 trying to save with stale version 0 should fail
+        assertThrows(StaleStateException.class, () -> stores.get(1).saveOrFail(lraId, state, 0),
+                "Stale version should throw StaleStateException");
 
-            LockManager.LockHandle lock1 = lockManagers.get(1).acquireLock(lraId, 100, TimeUnit.MILLISECONDS);
+        // And: Node 1 can save with correct version 1
+        LRAState updated = stores.get(1).saveOrFail(lraId,
+                createTestLRAState(lraId, LRAStatus.Closing), 1);
+        assertEquals(2, updated.getVersion(), "Version should be incremented to 2");
+    }
 
-            if (lock0 != null) {
-                lock0.release();
+    @Test
+    void testConcurrentCASOnlyOneSucceeds() throws InterruptedException {
+        // Given: 2-node cluster with an existing LRA
+        createTestCluster(2);
+
+        URI lraId = URI.create("http://localhost:8080/lra-coordinator/test-lra-cas");
+        InfinispanLRAState state = createTestLRAState(lraId, LRAStatus.Active);
+        stores.get(0).saveOrFail(lraId, state, 0); // version becomes 1
+
+        // When: Two threads try to CAS-write the same LRA concurrently
+        AtomicInteger successCount = new AtomicInteger(0);
+        AtomicInteger failCount = new AtomicInteger(0);
+
+        Thread t1 = new Thread(() -> {
+            try {
+                stores.get(0).saveOrFail(lraId,
+                        createTestLRAState(lraId, LRAStatus.Closing), 1);
+                successCount.incrementAndGet();
+            } catch (StaleStateException e) {
+                failCount.incrementAndGet();
             }
-            if (lock1 != null) {
-                lock1.release();
+        });
+
+        Thread t2 = new Thread(() -> {
+            try {
+                stores.get(1).saveOrFail(lraId,
+                        createTestLRAState(lraId, LRAStatus.Cancelling), 1);
+                successCount.incrementAndGet();
+            } catch (StaleStateException e) {
+                failCount.incrementAndGet();
             }
-        } else {
-            // Without JGroups transport, lock manager cannot initialize.
-            // Verify graceful degradation: acquireLock returns null.
-            LockManager.LockHandle lock = lockManager.acquireLock(lraId, 1, TimeUnit.SECONDS);
-            assertNull(lock, "Lock manager should return null when not initialized");
-            assertFalse(lockManager.isInitialized(),
-                    "Lock manager should not be initialized without JGroups transport");
-        }
+        });
+
+        t1.start();
+        t2.start();
+        t1.join();
+        t2.join();
+
+        // Then: Exactly one should succeed and the other should get StaleStateException
+        assertEquals(1, successCount.get(), "Exactly one CAS should succeed");
+        assertEquals(1, failCount.get(), "Exactly one CAS should fail with StaleStateException");
     }
 
     @Test
@@ -251,8 +272,8 @@ class HACoordinatorTest {
         assertTrue(available, "Cache should be available in single-node cluster");
 
         // And: Availability mode should be AVAILABLE
-        AvailabilityMode mode = store.getAvailabilityMode();
-        assertEquals(AvailabilityMode.AVAILABLE, mode);
+        String mode = store.getAvailabilityMode();
+        assertEquals("AVAILABLE", mode);
     }
 
     @Test
@@ -382,6 +403,7 @@ class HACoordinatorTest {
                 null,
                 0L,
                 "test-node",
-                new byte[0]);
+                new byte[0],
+                0L);
     }
 }

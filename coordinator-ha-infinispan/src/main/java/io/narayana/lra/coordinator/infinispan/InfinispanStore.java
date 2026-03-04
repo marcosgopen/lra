@@ -7,8 +7,10 @@ package io.narayana.lra.coordinator.infinispan;
 
 import io.narayana.lra.coordinator.domain.model.LRAState;
 import io.narayana.lra.coordinator.internal.LRAStore;
+import io.narayana.lra.coordinator.internal.StaleStateException;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.inject.Named;
 import java.net.URI;
@@ -16,7 +18,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Map;
 import org.infinispan.Cache;
-import org.infinispan.partitionhandling.AvailabilityMode;
 
 /**
  * Manages LRA state storage in Infinispan distributed caches.
@@ -36,17 +37,23 @@ public class InfinispanStore implements LRAStore {
 
     @Inject
     @Named("activeLRACache")
-    private Cache<String, LRAState> activeLRACache;
+    private Instance<Cache<String, LRAState>> activeLRACacheInstance;
 
     @Inject
     @Named("recoveringLRACache")
-    private Cache<String, LRAState> recoveringLRACache;
+    private Instance<Cache<String, LRAState>> recoveringLRACacheInstance;
 
     @Inject
     @Named("failedLRACache")
+    private Instance<Cache<String, LRAState>> failedLRACacheInstance;
+
+    // Resolved lazily from Instance; null when HA is disabled or caches unavailable
+    private Cache<String, LRAState> activeLRACache;
+    private Cache<String, LRAState> recoveringLRACache;
     private Cache<String, LRAState> failedLRACache;
 
-    private volatile Boolean haEnabled = null;
+    private volatile boolean haEnabled = false;
+    private volatile boolean haInitialized = false;
 
     /**
      * Initializes the store and checks if HA mode is enabled.
@@ -57,6 +64,18 @@ public class InfinispanStore implements LRAStore {
         boolean enabled = "true".equalsIgnoreCase(haEnabledProp);
 
         if (enabled) {
+            // Resolve caches: prefer already-set values (e.g. test subclass overrides),
+            // then try CDI Instance resolution (tolerates unavailable producers)
+            if (activeLRACache == null) {
+                activeLRACache = resolveCache(activeLRACacheInstance);
+            }
+            if (recoveringLRACache == null) {
+                recoveringLRACache = resolveCache(recoveringLRACacheInstance);
+            }
+            if (failedLRACache == null) {
+                failedLRACache = resolveCache(failedLRACacheInstance);
+            }
+
             if (getActiveLRACache() == null || getRecoveringLRACache() == null || getFailedLRACache() == null) {
                 LRALogger.logger.warn("HA mode enabled but Infinispan caches not available, disabling HA");
                 enabled = false;
@@ -68,36 +87,102 @@ public class InfinispanStore implements LRAStore {
         }
 
         this.haEnabled = enabled;
+        this.haInitialized = true;
     }
 
     /**
-     * Saves an LRA to the appropriate cache based on its status.
-     * Converts the given {@link LRAState} to {@link InfinispanLRAState}
-     * for ProtoStream serialization if necessary.
+     * Safely resolves a cache from a CDI Instance, returning null if unavailable.
+     */
+    private Cache<String, LRAState> resolveCache(Instance<Cache<String, LRAState>> instance) {
+        if (instance == null || instance.isUnsatisfied()) {
+            return null;
+        }
+        try {
+            return instance.get();
+        } catch (Exception e) {
+            LRALogger.logger.debugf("Cache instance not available: %s", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Saves LRA state with compare-and-swap semantics.
+     * For new LRAs (expectedVersion == 0), uses putIfAbsent.
+     * For existing LRAs, uses replace with version check.
      *
      * @param lraId the LRA ID
-     * @param state the LRA state
+     * @param state the LRA state to save
+     * @param expectedVersion the version the caller expects
+     * @return the saved LRAState with incremented version
+     * @throws StaleStateException if version conflict detected
      */
-    public void saveLRA(URI lraId, LRAState state) {
+    @Override
+    public LRAState saveOrFail(URI lraId, LRAState state, long expectedVersion) {
         if (!haEnabled || state == null) {
-            return;
+            return state;
         }
 
         String key = lraId.toString();
-        InfinispanLRAState ispnState = toInfinispanState(state);
-        Cache<String, LRAState> targetCache = getCacheForState(ispnState);
+        long newVersion = expectedVersion + 1;
+        InfinispanLRAState newState = toInfinispanState(state).withVersion(newVersion);
+        Cache<String, LRAState> targetCache = getCacheForState(newState);
 
-        // Write to target cache FIRST, then remove stale entries.
-        // If a crash occurs between the put and the removes, we have a
-        // harmless duplicate (loadLRA checks caches in a fixed order)
-        // rather than a lost entry.
-        targetCache.put(key, ispnState);
+        if (expectedVersion == 0) {
+            // New LRA — use putIfAbsent
+            LRAState existing = targetCache.putIfAbsent(key, newState);
+            if (existing != null) {
+                throw new StaleStateException(lraId, expectedVersion, existing.getVersion());
+            }
+        } else {
+            // Existing LRA — load current value, verify version, then CAS
+            LRAState currentValue = loadLRA(lraId);
+            if (currentValue == null) {
+                // Entry was removed between caller's read and this write;
+                // treat as new entry
+                LRAState existing = targetCache.putIfAbsent(key, newState);
+                if (existing != null) {
+                    throw new StaleStateException(lraId, expectedVersion, existing.getVersion());
+                }
+            } else {
+                if (currentValue.getVersion() != expectedVersion) {
+                    throw new StaleStateException(lraId, expectedVersion, currentValue.getVersion());
+                }
+                // Determine which cache currently holds the entry
+                Cache<String, LRAState> sourceCache = findCacheContaining(key);
+                if (sourceCache == targetCache) {
+                    // Same cache — atomic replace
+                    boolean replaced = targetCache.replace(key, currentValue, newState);
+                    if (!replaced) {
+                        LRAState actual = loadLRA(lraId);
+                        throw new StaleStateException(lraId, expectedVersion,
+                                actual != null ? actual.getVersion() : -1);
+                    }
+                } else {
+                    // Cross-cache move: CAS-remove from source to claim ownership,
+                    // then write to destination. If CAS-remove fails, another node
+                    // already modified/moved this entry.
+                    if (sourceCache != null) {
+                        boolean removed = sourceCache.remove(key, currentValue);
+                        if (!removed) {
+                            LRAState actual = loadLRA(lraId);
+                            throw new StaleStateException(lraId, expectedVersion,
+                                    actual != null ? actual.getVersion() : -1);
+                        }
+                    }
+                    targetCache.put(key, newState);
+                }
+            }
+        }
+
+        // Clean stale entries from other caches
         removeFromOtherCaches(key, targetCache);
 
         if (LRALogger.logger.isTraceEnabled()) {
-            LRALogger.logger.tracef("Saved LRA %s to Infinispan cache (status: %s)",
-                    lraId, state.getStatus());
+            LRALogger.logger.tracef("Saved LRA %s to Infinispan cache (status: %s, version: %d)",
+                    lraId, state.getStatus(), newVersion);
         }
+
+        return newState;
     }
 
     /**
@@ -109,6 +194,22 @@ public class InfinispanStore implements LRAStore {
             return (InfinispanLRAState) state;
         }
         return InfinispanLRAState.from(state);
+    }
+
+    /**
+     * Finds which cache currently holds the entry for the given key.
+     *
+     * @param key the cache key
+     * @return the cache containing the key, or null if not found
+     */
+    private Cache<String, LRAState> findCacheContaining(String key) {
+        if (getActiveLRACache().containsKey(key))
+            return getActiveLRACache();
+        if (getRecoveringLRACache().containsKey(key))
+            return getRecoveringLRACache();
+        if (getFailedLRACache().containsKey(key))
+            return getFailedLRACache();
+        return null;
     }
 
     /**
@@ -197,17 +298,25 @@ public class InfinispanStore implements LRAStore {
     }
 
     /**
-     * Moves an LRA to the recovering cache.
-     * Removes from other caches and adds to recovering cache.
-     *
-     * Delegates to {@link #saveLRA(URI, LRAState)} which handles
-     * cache routing and stale entry cleanup.
+     * Moves an LRA to the recovering cache with CAS semantics.
      *
      * @param lraId the LRA ID
      * @param state the updated LRA state (should be Closing or Cancelling)
+     * @param expectedVersion the version the caller expects
+     * @return true if the move succeeded, false if another node already moved it
      */
-    public void moveToRecovering(URI lraId, LRAState state) {
-        saveLRA(lraId, state);
+    @Override
+    public boolean moveToRecovering(URI lraId, LRAState state, long expectedVersion) {
+        try {
+            saveOrFail(lraId, state, expectedVersion);
+            return true;
+        } catch (StaleStateException e) {
+            if (LRALogger.logger.isDebugEnabled()) {
+                LRALogger.logger.debugf("CAS conflict moving LRA %s to recovering: %s",
+                        lraId, e.getMessage());
+            }
+            return false;
+        }
     }
 
     /**
@@ -254,7 +363,7 @@ public class InfinispanStore implements LRAStore {
      * @return true if HA is enabled
      */
     public boolean isHaEnabled() {
-        if (haEnabled == null) {
+        if (!haInitialized) {
             initialize();
         }
         return haEnabled;
@@ -271,14 +380,16 @@ public class InfinispanStore implements LRAStore {
      * @return true if cache is available for operations
      */
     public boolean isAvailable() {
-        if (!haEnabled || getActiveLRACache() == null) {
+        if (!isHaEnabled() || getActiveLRACache() == null) {
             return true; // Single-instance mode or not initialized
         }
 
         try {
-            AvailabilityMode mode = getActiveLRACache().getAdvancedCache().getAvailability();
+            // Use string comparison to avoid class loading issues with AvailabilityMode
+            // in WildFly deployments where org.infinispan.partitionhandling may not be exported
+            String mode = getActiveLRACache().getAdvancedCache().getAvailability().name();
 
-            if (mode == AvailabilityMode.DEGRADED_MODE) {
+            if ("DEGRADED_MODE".equals(mode)) {
                 if (LRALogger.logger.isDebugEnabled()) {
                     LRALogger.logger.debug(
                             "Cache in DEGRADED_MODE - node is in minority partition");
@@ -294,17 +405,17 @@ public class InfinispanStore implements LRAStore {
     }
 
     /**
-     * Gets the current availability mode of the cache.
+     * Gets the current availability mode of the cache as a string.
      *
-     * @return the availability mode, or null if not in HA mode
+     * @return the availability mode name (e.g. "AVAILABLE", "DEGRADED_MODE"), or null if not in HA mode
      */
-    public AvailabilityMode getAvailabilityMode() {
+    public String getAvailabilityMode() {
         if (!haEnabled || getActiveLRACache() == null) {
             return null;
         }
 
         try {
-            return getActiveLRACache().getAdvancedCache().getAvailability();
+            return getActiveLRACache().getAdvancedCache().getAvailability().name();
         } catch (Exception e) {
             LRALogger.logger.warnf(e, "Error getting cache availability mode");
             return null;

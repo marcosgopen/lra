@@ -7,7 +7,6 @@ package io.narayana.lra.coordinator.infinispan;
 
 import io.narayana.lra.coordinator.domain.model.LRAState;
 import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
-import io.narayana.lra.coordinator.internal.LockManager;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -134,10 +133,24 @@ public class InfinispanConfiguration {
                 System.getProperty("jgroups.bind_addr", "127.0.0.1"));
         System.setProperty("jgroups.bind_addr", bindAddr);
 
-        // Use ProtoStream for type-safe, schema-based serialization
-        globalConfig
-                .serialization()
-                .addContextInitializer(new LRASchemaInitializerImpl());
+        // Use ProtoStream for type-safe, schema-based serialization.
+        // Load the generated initializer via reflection to avoid a hard class
+        // dependency on protostream APIs, which may not be visible to the WAR
+        // classloader in WildFly subsystem mode (where embedded mode is unused).
+        try {
+            Class<?> initClass = Class.forName(
+                    "io.narayana.lra.coordinator.infinispan.LRASchemaInitializerImpl");
+            Object initializer = initClass.getDeclaredConstructor().newInstance();
+            // addContextInitializer accepts SerializationContextInitializer
+            globalConfig.serialization()
+                    .getClass()
+                    .getMethod("addContextInitializer",
+                            Class.forName("org.infinispan.protostream.SerializationContextInitializer"))
+                    .invoke(globalConfig.serialization(), initializer);
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Failed to load LRASchemaInitializerImpl — "
+                    + "ProtoStream serialization will not be available");
+        }
 
         globalConfig
                 .globalState()
@@ -281,25 +294,6 @@ public class InfinispanConfiguration {
         InfinispanClusterCoordinator coordinator = new InfinispanClusterCoordinator();
         coordinator.initialize(cacheManager);
         return coordinator;
-    }
-
-    /**
-     * Produces the lock manager bean.
-     *
-     * @return the lock manager
-     */
-    @Produces
-    @ApplicationScoped
-    public LockManager lockManager() {
-        if (!initialized) {
-            initialize();
-        }
-        if (cacheManager == null) {
-            return null;
-        }
-        InfinispanLockManager lockMgr = new InfinispanLockManager();
-        lockMgr.initialize(cacheManager);
-        return lockMgr;
     }
 
     /**

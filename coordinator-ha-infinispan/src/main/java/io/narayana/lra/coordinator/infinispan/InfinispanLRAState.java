@@ -13,6 +13,7 @@ import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import java.io.Serializable;
 import java.net.URI;
 import java.time.LocalDateTime;
+import java.util.Objects;
 import org.eclipse.microprofile.lra.annotation.LRAStatus;
 import org.infinispan.protostream.annotations.ProtoFactory;
 import org.infinispan.protostream.annotations.ProtoField;
@@ -43,6 +44,7 @@ public class InfinispanLRAState implements LRAState, Serializable {
     private final long timeLimit;
     private final String nodeId;
     private final byte[] serializedState;
+    private final long version;
 
     /**
      * ProtoStream deserialization constructor.
@@ -51,7 +53,7 @@ public class InfinispanLRAState implements LRAState, Serializable {
     @ProtoFactory
     public InfinispanLRAState(String idString, String parentIdString, String clientId, String statusName,
             String startTimeString, String finishTimeString,
-            long timeLimit, String nodeId, byte[] serializedState) {
+            long timeLimit, String nodeId, byte[] serializedState, long version) {
         this.id = idString != null ? URI.create(idString) : null;
         this.parentId = parentIdString != null ? URI.create(parentIdString) : null;
         this.clientId = clientId;
@@ -61,6 +63,7 @@ public class InfinispanLRAState implements LRAState, Serializable {
         this.timeLimit = timeLimit;
         this.nodeId = nodeId;
         this.serializedState = serializedState;
+        this.version = version;
     }
 
     /**
@@ -81,7 +84,28 @@ public class InfinispanLRAState implements LRAState, Serializable {
                 state.getFinishTime() != null ? state.getFinishTime().toString() : null,
                 state.getTimeLimit(),
                 state.getNodeId(),
-                state.getSerializedState());
+                state.getSerializedState(),
+                state.getVersion());
+    }
+
+    /**
+     * Creates a copy of this state with a different version number.
+     *
+     * @param newVersion the new version
+     * @return a new InfinispanLRAState with the updated version
+     */
+    public InfinispanLRAState withVersion(long newVersion) {
+        return new InfinispanLRAState(
+                id != null ? id.toString() : null,
+                parentId != null ? parentId.toString() : null,
+                clientId,
+                status != null ? status.name() : null,
+                startTime != null ? startTime.toString() : null,
+                finishTime != null ? finishTime.toString() : null,
+                timeLimit,
+                nodeId,
+                serializedState,
+                newVersion);
     }
 
     @Override
@@ -151,6 +175,12 @@ public class InfinispanLRAState implements LRAState, Serializable {
         return serializedState;
     }
 
+    @Override
+    @ProtoField(number = 10, defaultValue = "0")
+    public long getVersion() {
+        return version;
+    }
+
     // Domain getters (return original types)
 
     @Override
@@ -179,8 +209,23 @@ public class InfinispanLRAState implements LRAState, Serializable {
     }
 
     @Override
+    public boolean equals(Object o) {
+        if (this == o)
+            return true;
+        if (!(o instanceof InfinispanLRAState))
+            return false;
+        InfinispanLRAState that = (InfinispanLRAState) o;
+        return version == that.version && Objects.equals(id, that.id);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(id, version);
+    }
+
+    @Override
     public String toString() {
-        return String.format("InfinispanLRAState{id=%s, status=%s, nodeId=%s, startTime=%s}",
-                id, status, nodeId, startTime);
+        return String.format("InfinispanLRAState{id=%s, status=%s, version=%d, nodeId=%s, startTime=%s}",
+                id, status, version, nodeId, startTime);
     }
 }

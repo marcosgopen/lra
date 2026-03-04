@@ -10,12 +10,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.domain.service.LRAService;
 import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
-import io.narayana.lra.coordinator.internal.LockManager;
 import java.net.URI;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -75,7 +70,7 @@ class SimpleHATest {
         System.setProperty(PROP_NODE_ID, nodeId);
 
         LRAService service = new LRAService();
-        service.initializeHA(createMockHAStore(), null, null);
+        service.initializeHA(createMockHAStore(), null);
         return service;
     }
 
@@ -124,7 +119,7 @@ class SimpleHATest {
         System.setProperty(PROP_NODE_ID, "my-coordinator-1");
 
         LRAService service = new LRAService();
-        service.initializeHA(null, null, null);
+        service.initializeHA(null, null);
 
         // When/Then: Should return the configured value
         assertEquals("my-coordinator-1", service.getNodeId());
@@ -136,7 +131,7 @@ class SimpleHATest {
         System.clearProperty(PROP_NODE_ID);
 
         LRAService service = new LRAService();
-        service.initializeHA(null, null, null);
+        service.initializeHA(null, null);
 
         // When/Then: Should return some value (either HOSTNAME or fallback)
         String nodeId = service.getNodeId();
@@ -233,94 +228,6 @@ class SimpleHATest {
 
         // Then: Should not be initialized yet
         assertFalse(coordinator.isInitialized());
-    }
-
-    /**
-     * Verifies that reentrant lock acquisition does not deadlock.
-     *
-     * Infinispan's ClusteredLock is not reentrant — calling lock() twice
-     * from the same node without an unlock() in between will block forever.
-     * The LRAService must detect reentrant calls (same thread already holds
-     * the local ReentrantLock) and skip the distributed lock acquisition.
-     *
-     * This test uses a mock LockManager that tracks acquisition count and
-     * fails if a second (reentrant) distributed lock acquisition is attempted.
-     */
-    @Test
-    void testReentrantLockDoesNotAcquireDistributedLockTwice() {
-        // Given: HA service with a mock LockManager that tracks acquisitions
-        AtomicInteger acquireCount = new AtomicInteger(0);
-        AtomicBoolean released = new AtomicBoolean(false);
-
-        LockManager mockLockManager = new LockManager() {
-            @Override
-            public LockHandle acquireLock(URI lraId) {
-                int count = acquireCount.incrementAndGet();
-                if (count > 1) {
-                    fail("Distributed lock acquired more than once for the same LRA — "
-                            + "reentrant call was not detected (would deadlock with real ClusteredLock)");
-                }
-                return createHandle(lraId);
-            }
-
-            @Override
-            public LockHandle acquireLock(URI lraId, long timeout, TimeUnit unit) {
-                return acquireLock(lraId);
-            }
-
-            @Override
-            public boolean isInitialized() {
-                return true;
-            }
-
-            private LockHandle createHandle(URI lraId) {
-                return new LockHandle() {
-                    @Override
-                    public void release() {
-                        released.set(true);
-                    }
-
-                    @Override
-                    public URI getLraId() {
-                        return lraId;
-                    }
-
-                    @Override
-                    public boolean isReleased() {
-                        return released.get();
-                    }
-                };
-            }
-        };
-
-        System.setProperty(PROP_HA_ENABLED, "true");
-        System.setProperty(PROP_NODE_ID, "test-node");
-
-        LRAService service = new LRAService();
-        service.initializeHA(createMockHAStore(), mockLockManager, null);
-
-        URI lraId = URI.create("http://localhost:8080/lra-coordinator/test-reentrant-1");
-
-        // When: acquire the lock, then reentrant acquire, then unlock both
-        ReentrantLock outerLock = service.lockTransaction(lraId);
-        assertNotNull(outerLock, "First lock acquisition should succeed");
-        assertEquals(1, acquireCount.get(), "Distributed lock should be acquired once");
-
-        ReentrantLock innerLock = service.lockTransaction(lraId);
-        assertNotNull(innerLock, "Reentrant lock acquisition should succeed");
-        assertSame(outerLock, innerLock, "Should return the same lock instance");
-        assertEquals(1, acquireCount.get(),
-                "Distributed lock should NOT be acquired again on reentrant call");
-
-        // Unlock inner (reentrant) — distributed lock should NOT be released yet
-        innerLock.unlock();
-        assertFalse(released.get(),
-                "Distributed lock should not be released until final unlock");
-
-        // Unlock outer (final) — distributed lock SHOULD be released now
-        outerLock.unlock();
-        assertTrue(released.get(),
-                "Distributed lock should be released on final unlock");
     }
 
     @Test

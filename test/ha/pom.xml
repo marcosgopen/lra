@@ -142,95 +142,98 @@
         </executions>
       </plugin>
 
-      <!-- Configure LRA Infinispan caches and create per-node server base directories -->
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-antrun-plugin</artifactId>
-        <executions>
-          <!-- Step 1: Run offline CLI to add LRA cache container to standalone-ha.xml.
-               Uses embed-server so no running WildFly instance is needed.
-               This modifies the config in JBOSS_HOME BEFORE copying to node dirs. -->
-          <execution>
-            <id>configure-lra-caches</id>
-            <goals>
-              <goal>run</goal>
-            </goals>
-            <phase>pre-integration-test</phase>
-            <configuration>
-              <target>
-                <exec executable="${env.JBOSS_HOME}/bin/jboss-cli.sh" failonerror="true">
-                  <env key="JBOSS_HOME" value="${env.JBOSS_HOME}"></env>
-                  <arg value="--file=${project.basedir}/src/test/resources/configure-lra-caches.cli"></arg>
-                </exec>
-              </target>
-            </configuration>
-          </execution>
-
-          <!-- Step 2: Copy the (now-modified) configuration to per-node directories -->
-          <execution>
-            <id>prepare-ha-nodes</id>
-            <goals>
-              <goal>run</goal>
-            </goals>
-            <phase>pre-integration-test</phase>
-            <configuration>
-              <target>
-                <copy todir="${project.build.directory}/wildfly-node1/configuration">
-                  <fileset dir="${env.JBOSS_HOME}/standalone/configuration"></fileset>
-                </copy>
-                <mkdir dir="${project.build.directory}/wildfly-node1/deployments"></mkdir>
-                <copy todir="${project.build.directory}/wildfly-node2/configuration">
-                  <fileset dir="${env.JBOSS_HOME}/standalone/configuration"></fileset>
-                </copy>
-                <mkdir dir="${project.build.directory}/wildfly-node2/deployments"></mkdir>
-                <copy todir="${project.build.directory}/wildfly-node3/configuration">
-                  <fileset dir="${env.JBOSS_HOME}/standalone/configuration"></fileset>
-                </copy>
-                <mkdir dir="${project.build.directory}/wildfly-node3/deployments"></mkdir>
-              </target>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-failsafe-plugin</artifactId>
-        <executions>
-          <execution>
-            <goals>
-              <goal>integration-test</goal>
-              <goal>verify</goal>
-            </goals>
-            <configuration>
-              <!-- Override the root POM's skipITs=true so HA tests always run -->
-              <skipITs>false</skipITs>
-              <systemPropertyVariables>
-                <arquillian.xml>arquillian-wildfly.xml</arquillian.xml>
-                <wildfly.home>${env.JBOSS_HOME}</wildfly.home>
-                <lra.coordinator.ha.enabled>true</lra.coordinator.ha.enabled>
-                <project.version>${project.version}</project.version>
-                <project.build.directory>${project.build.directory}</project.build.directory>
-                <version.microprofile.lra>${version.microprofile.lra}</version.microprofile.lra>
-              </systemPropertyVariables>
-              <!-- Test selection controlled by ha.test.includes property -->
-              <!-- Default: HAClusteringIT only. Profiles override for other suites. -->
-              <includes>
-                <include>${ha.test.includes}</include>
-              </includes>
-              <forkedProcessTimeoutInSeconds>${ha.test.timeout}</forkedProcessTimeoutInSeconds>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
     </plugins>
   </build>
 
   <profiles>
-    <!-- Kept for backward compatibility; the main build section now handles
-         wildfly-maven-plugin disabling and skipITs override -->
+    <!-- needed for HA tests, it configure the wildfly nodes and needs JBOSS_HOME to be set -->
     <profile>
       <id>arq</id>
+      <build>
+        <plugins>
+          <!-- Configure LRA Infinispan caches and create per-node server base directories -->
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-antrun-plugin</artifactId>
+            <executions>
+              <!-- Step 1: Run offline CLI to add LRA cache container to standalone-ha.xml.
+                   Uses embed-server so no running WildFly instance is needed.
+                   This modifies the config in JBOSS_HOME BEFORE copying to node dirs. -->
+              <execution>
+                <id>configure-lra-caches</id>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <phase>pre-integration-test</phase>
+                <configuration>
+                  <target>
+                    <exec executable="${env.JBOSS_HOME}/bin/jboss-cli.sh" failonerror="true">
+                      <env key="JBOSS_HOME" value="${env.JBOSS_HOME}"></env>
+                      <arg value="--file=${project.basedir}/src/test/resources/configure-lra-caches.cli"></arg>
+                    </exec>
+                  </target>
+                </configuration>
+              </execution>
+
+              <!-- Step 2: Copy the (now-modified) configuration to per-node directories -->
+              <execution>
+                <id>prepare-ha-nodes</id>
+                <goals>
+                  <goal>run</goal>
+                </goals>
+                <phase>pre-integration-test</phase>
+                <configuration>
+                  <target>
+                    <copy todir="${project.build.directory}/wildfly-node1/configuration">
+                      <fileset dir="${env.JBOSS_HOME}/standalone/configuration"></fileset>
+                    </copy>
+                    <mkdir dir="${project.build.directory}/wildfly-node1/deployments"></mkdir>
+                    <copy todir="${project.build.directory}/wildfly-node2/configuration">
+                      <fileset dir="${env.JBOSS_HOME}/standalone/configuration"></fileset>
+                    </copy>
+                    <mkdir dir="${project.build.directory}/wildfly-node2/deployments"></mkdir>
+                    <copy todir="${project.build.directory}/wildfly-node3/configuration">
+                      <fileset dir="${env.JBOSS_HOME}/standalone/configuration"></fileset>
+                    </copy>
+                    <mkdir dir="${project.build.directory}/wildfly-node3/deployments"></mkdir>
+                  </target>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <executions>
+              <execution>
+                <goals>
+                  <goal>integration-test</goal>
+                  <goal>verify</goal>
+                </goals>
+                <configuration>
+                  <!-- Override the root POM's skipITs=true so HA tests always run -->
+                  <skipITs>false</skipITs>
+                  <systemPropertyVariables>
+                    <arquillian.xml>arquillian-wildfly.xml</arquillian.xml>
+                    <wildfly.home>${env.JBOSS_HOME}</wildfly.home>
+                    <lra.coordinator.ha.enabled>true</lra.coordinator.ha.enabled>
+                    <project.version>${project.version}</project.version>
+                    <project.build.directory>${project.build.directory}</project.build.directory>
+                    <version.microprofile.lra>${version.microprofile.lra}</version.microprofile.lra>
+                  </systemPropertyVariables>
+                  <!-- Test selection controlled by ha.test.includes property -->
+                  <!-- Default: HAClusteringIT only. Profiles override for other suites. -->
+                  <includes>
+                    <include>${ha.test.includes}</include>
+                  </includes>
+                  <forkedProcessTimeoutInSeconds>${ha.test.timeout}</forkedProcessTimeoutInSeconds>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
     </profile>
 
     <!-- Profile for running multi-node cluster tests (requires WildFly) -->

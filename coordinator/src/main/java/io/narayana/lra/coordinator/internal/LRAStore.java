@@ -164,4 +164,19 @@ public interface LRAStore {
      * @return collection of failed LRA states, empty collection if none exist or HA is disabled
      */
     Collection<LRAState> getAllFailedLRAs();
+
+    /**
+     * Loads an LRA from storage by its Arjuna UID.
+     *
+     * This is needed when the full LRA URI is not available, such as when
+     * resolving recovery URLs which only contain the UID segment. The
+     * implementation should scan all storage locations (active, recovering,
+     * failed) for an entry whose LRA UID matches the given value.
+     *
+     * @param uid the Arjuna UID string (e.g. "0_ffff0a28054b_9133_5f855916_a7")
+     * @return the LRA state, or null if not found
+     */
+    default LRAState loadLRAByUid(String uid) {
+        return null;
+    }
 }

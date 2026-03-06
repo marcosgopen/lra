@@ -1324,6 +1324,101 @@ public class LongRunningAction extends BasicAction {
         }
     }
 
+    /**
+     * Looks up the participant URL associated with the given recovery URL
+     * by searching the transaction's record lists.
+     *
+     * Uses path-based comparison so that the lookup works across cluster
+     * nodes where the host:port in the recovery URL may differ from the
+     * host:port stored in the participant's recovery URI.
+     *
+     * @param recoveryUrl the full recovery URL
+     * @return the participant URL, or null if not found
+     */
+    public String lookupParticipantUrl(String recoveryUrl) {
+        // First try exact match (same node)
+        LRAParticipantRecord record = findLRAParticipant(recoveryUrl, false);
+
+        // Fall back to path-based match for cross-node lookups where host:port differs
+        if (record == null) {
+            try {
+                String lookupPath = new URI(recoveryUrl).getPath();
+                if (lookupPath != null) {
+                    record = findParticipantByRecoveryPath(lookupPath);
+                }
+            } catch (URISyntaxException e) {
+                // fall through to return null
+            }
+        }
+
+        return record != null ? record.getParticipantURI() : null;
+    }
+
+    /**
+     * Updates a participant's callbacks using path-based matching, without
+     * persisting to the local ObjectStore. This is used in HA mode where
+     * the caller manages persistence to the distributed store separately.
+     *
+     * @param newLinkHeader the new compensator link header
+     * @param recoveryUrl the recovery URL to identify the participant (may have different host:port)
+     * @return true if the participant was found and updated
+     */
+    public boolean updateParticipantCallbacks(String newLinkHeader, String recoveryUrl) {
+        // First try exact match
+        LRAParticipantRecord record = findLRAParticipant(recoveryUrl, false);
+
+        // Fall back to path-based match for cross-node lookups
+        if (record == null) {
+            try {
+                String lookupPath = new URI(recoveryUrl).getPath();
+                if (lookupPath != null) {
+                    record = findParticipantByRecoveryPath(lookupPath);
+                }
+            } catch (URISyntaxException e) {
+                // fall through
+            }
+        }
+
+        if (record != null) {
+            // updateCallbacks handles a single link; split multi-link headers
+            if (newLinkHeader.startsWith("<")) {
+                for (String link : newLinkHeader.split(",")) {
+                    record.updateCallbacks(link.trim());
+                }
+            } else {
+                record.updateCallbacks(newLinkHeader);
+            }
+            // Update participantPath so getParticipantURI() reflects the new
+            // URLs. This keeps the HA distributed store and getCompensator
+            // consistent with the non-HA lraParticipants map.
+            record.setParticipantPath(newLinkHeader);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Finds a participant record by matching the path portion of its recovery URI.
+     */
+    private LRAParticipantRecord findParticipantByRecoveryPath(String path) {
+        for (RecordList list : new RecordList[] { pendingList, preparedList, heuristicList, failedList }) {
+            if (list != null) {
+                RecordListIterator iter = new RecordListIterator(list);
+                AbstractRecord r;
+                while ((r = iter.iterate()) != null) {
+                    if (r instanceof LRAParticipantRecord) {
+                        LRAParticipantRecord pr = (LRAParticipantRecord) r;
+                        if (pr.getRecoveryURI() != null
+                                && path.equals(pr.getRecoveryURI().getPath())) {
+                            return pr;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
     public boolean updateRecoveryURI(String linkHeader, String recoveryUri) {
         LRAParticipantRecord lraRecord = findLRAParticipant(recoveryUri, false);
 

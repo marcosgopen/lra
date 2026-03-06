@@ -5,6 +5,7 @@
 
 package io.narayana.lra.coordinator.infinispan;
 
+import io.narayana.lra.LRAConstants;
 import io.narayana.lra.coordinator.domain.model.LRAState;
 import io.narayana.lra.coordinator.internal.LRAStore;
 import io.narayana.lra.coordinator.internal.StaleStateException;
@@ -271,6 +272,49 @@ public class InfinispanStore implements LRAStore {
             LRALogger.logger.warnf(e, "Failed to load LRA %s from Infinispan", lraId);
             return null;
         }
+    }
+
+    /**
+     * Loads an LRA from Infinispan by its Arjuna UID.
+     * Scans all caches for an entry whose LRA ID ends with the given UID.
+     *
+     * @param uid the Arjuna UID string
+     * @return the LRA state, or null if not found
+     */
+    @Override
+    public LRAState loadLRAByUid(String uid) {
+        if (!haEnabled || uid == null || uid.isEmpty()) {
+            return null;
+        }
+
+        try {
+            LRAState state = findByUidInCache(getActiveLRACache(), uid);
+            if (state != null) {
+                return state;
+            }
+
+            state = findByUidInCache(getRecoveringLRACache(), uid);
+            if (state != null) {
+                return state;
+            }
+
+            return findByUidInCache(getFailedLRACache(), uid);
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Failed to load LRA by UID %s from Infinispan", uid);
+            return null;
+        }
+    }
+
+    private LRAState findByUidInCache(Cache<String, LRAState> cache, String uid) {
+        if (cache == null) {
+            return null;
+        }
+        for (LRAState state : cache.values()) {
+            if (state.getId() != null && uid.equals(LRAConstants.getLRAUid(state.getId()))) {
+                return state;
+            }
+        }
+        return null;
     }
 
     /**

@@ -390,6 +390,44 @@ class HACoordinatorTest {
         assertEquals(LRAStatus.Active, loaded.getStatus());
     }
 
+    @Test
+    void testLoadLRAByUid() {
+        createTestCluster(2);
+
+        URI lraId = URI.create("http://node-a:8080/lra-coordinator/0_ffff0a28054b_test_uid_123");
+        LRAState state = createTestLRAState(lraId, LRAStatus.Active);
+        stores.get(0).saveLRA(lraId, state);
+
+        LRAState found = stores.get(1).loadLRAByUid("0_ffff0a28054b_test_uid_123");
+
+        assertNotNull(found, "Should find LRA by UID from different node");
+        assertEquals(lraId, found.getId());
+    }
+
+    @Test
+    void testLoadLRAByUidReturnsNullWhenNotFound() {
+        createTestCluster(2);
+
+        LRAState found = stores.get(0).loadLRAByUid("nonexistent_uid");
+
+        assertNull(found, "Should return null for non-existent UID");
+    }
+
+    @Test
+    void testLoadLRAByUidSearchesAllCaches() {
+        createTestCluster(2);
+
+        URI activeId = URI.create("http://localhost:8080/lra-coordinator/active_uid_1");
+        URI recoveringId = URI.create("http://localhost:8080/lra-coordinator/recovering_uid_2");
+
+        stores.get(0).saveLRA(activeId, createTestLRAState(activeId, LRAStatus.Active));
+        stores.get(0).saveLRA(recoveringId, createTestLRAState(recoveringId, LRAStatus.Closing));
+        stores.get(0).moveToRecovering(recoveringId, createTestLRAState(recoveringId, LRAStatus.Closing));
+
+        assertNotNull(stores.get(1).loadLRAByUid("active_uid_1"), "Should find active LRA by UID");
+        assertNotNull(stores.get(1).loadLRAByUid("recovering_uid_2"), "Should find recovering LRA by UID");
+    }
+
     /**
      * Creates a test InfinispanLRAState.
      */

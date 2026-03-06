@@ -161,6 +161,7 @@
       <artifactId>hamcrest</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- High Availability: add lra-coordinator-ha-infinispan to enable HA with Infinispan -->
   </dependencies>
 
   <build>
@@ -175,9 +176,22 @@
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-checkstyle-plugin</artifactId>
+        <configuration>
+          <excludes>**/*$logger.java,**/*$bundle.java</excludes>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
         <configuration>
           <showDeprecation>false</showDeprecation>
+          <annotationProcessorPaths>
+            <path>
+              <groupId>org.jboss.logging</groupId>
+              <artifactId>jboss-logging-processor</artifactId>
+            </path>
+          </annotationProcessorPaths>
         </configuration>
       </plugin>
       <plugin>

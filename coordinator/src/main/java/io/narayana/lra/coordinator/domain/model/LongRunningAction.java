@@ -22,6 +22,8 @@ import io.narayana.lra.Current;
 import io.narayana.lra.LRAConstants;
 import io.narayana.lra.LRAData;
 import io.narayana.lra.coordinator.domain.service.LRAService;
+import io.narayana.lra.coordinator.internal.LRAStore;
+import io.narayana.lra.coordinator.internal.StaleStateException;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.ws.rs.ServiceUnavailableException;
 import jakarta.ws.rs.WebApplicationException;
@@ -63,12 +65,36 @@ public class LongRunningAction extends BasicAction {
     private ScheduledFuture<?> scheduledAbort;
     private final LRAService lraService;
     LRAParentAbstractRecord par;
+    private long timeLimit; // Added for HA state tracking
+    private LRAStore lraStore; // Optional, injected by LRAService for HA mode
+    private boolean serializingForHA; // Guard against recursive Infinispan save from toLRAState()
+    private volatile long distributedVersion = 0; // OCC version for distributed store
+    private static final int MAX_OCC_RETRIES = 3;
 
     private static long initParticipantEnlistTimeout() {
         try {
             return ConfigProvider.getConfig().getValue(ENLIST_PARTICIPANT_LOCK_TIMEOUT, Long.class);
         } catch (Exception e) {
             return 500; // the property is unset or there is no config provider so use the default value
+        }
+    }
+
+    /**
+     * Builds the UID path segment of the LRA ID.
+     * In HA mode, embeds the node ID: {NodeId}/{Uid}
+     * In single-instance mode, uses just: {Uid}
+     *
+     * @param lraService the LRAService
+     * @return the UID path segment
+     */
+    private String buildUidPath(LRAService lraService) {
+        String uidString = get_uid().fileStringForm();
+
+        if (lraService != null && lraService.isHaEnabled()) {
+            String nodeId = lraService.getNodeId();
+            return String.format("%s/%s", nodeId, uidString);
+        } else {
+            return uidString;
         }
     }
 
@@ -87,14 +113,17 @@ public class LongRunningAction extends BasicAction {
 
         this.lraService = lraService;
 
+        // Build LRA ID with optional node ID embedding for HA mode
+        String uidPath = buildUidPath(lraService);
+
         if (parent != null) {
             this.parentId = parent.getId();
             // encode the parent in the child URI (by rights we'd use LRA_HTTP_PARENT_CONTEXT_HEADER)
             // the parent is used by children to contact parents in certain scenarios
             // BTW  this technique is historical and needs to be changed to use the header
-            this.id = Current.buildFullLRAUrl(String.format("%s/%s", baseUrl, get_uid().fileStringForm()), parent.getId());
+            this.id = Current.buildFullLRAUrl(String.format("%s/%s", baseUrl, uidPath), parent.getId());
         } else {
-            this.id = new URI(String.format("%s/%s", baseUrl, get_uid().fileStringForm()));
+            this.id = new URI(String.format("%s/%s", baseUrl, uidPath));
         }
 
         this.clientId = clientId;
@@ -180,6 +209,47 @@ public class LongRunningAction extends BasicAction {
         } finally {
             if (LRALogger.logger.isTraceEnabled()) {
                 trace_progress("saved");
+            }
+        }
+
+        // Persist to distributed store only after all serialization into os
+        // has completed successfully. Doing this mid-stream would capture an
+        // incomplete buffer and would create divergence if save_state() failed
+        // after the Infinispan write.
+        // The serializingForHA guard prevents recursive saves when toLRAState()
+        // calls save_state() purely for serialization.
+        if (!serializingForHA && lraStore != null && lraStore.isHaEnabled() && id != null) {
+            for (int attempt = 0; attempt < MAX_OCC_RETRIES; attempt++) {
+                try {
+                    LRAState state = DefaultLRAState.fromLongRunningAction(this, os, distributedVersion);
+                    LRAState saved = lraStore.saveOrFail(id, state, distributedVersion);
+                    distributedVersion = saved.getVersion();
+                    if (LRALogger.logger.isTraceEnabled()) {
+                        LRALogger.logger.tracef("LRA %s saved to distributed store (version: %d)",
+                                id, distributedVersion);
+                    }
+                    break; // success
+                } catch (StaleStateException e) {
+                    LRAState current = lraStore.loadLRA(id);
+                    if (current != null) {
+                        distributedVersion = current.getVersion();
+                    }
+                    if (attempt == MAX_OCC_RETRIES - 1) {
+                        LRALogger.logger.errorf(e, "Failed to save LRA %s to distributed store after %d OCC retries",
+                                id, MAX_OCC_RETRIES);
+                        return false; // exhausted retries
+                    }
+                    if (LRALogger.logger.isDebugEnabled()) {
+                        LRALogger.logger.debugf("OCC retry %d for LRA %s (version conflict)", attempt + 1, id);
+                    }
+                } catch (Exception e) {
+                    // Fail the save so the caller (deactivate/updateState) can
+                    // signal the error.  The local ObjectStore already has the
+                    // state, so a retry will attempt the Infinispan write again.
+                    LRALogger.logger.errorf(e, "Failed to save LRA %s to distributed store — "
+                            + "failing save_state so the caller can retry", id);
+                    return false;
+                }
             }
         }
 
@@ -1254,6 +1324,101 @@ public class LongRunningAction extends BasicAction {
         }
     }
 
+    /**
+     * Looks up the participant URL associated with the given recovery URL
+     * by searching the transaction's record lists.
+     *
+     * Uses path-based comparison so that the lookup works across cluster
+     * nodes where the host:port in the recovery URL may differ from the
+     * host:port stored in the participant's recovery URI.
+     *
+     * @param recoveryUrl the full recovery URL
+     * @return the participant URL, or null if not found
+     */
+    public String lookupParticipantUrl(String recoveryUrl) {
+        // First try exact match (same node)
+        LRAParticipantRecord record = findLRAParticipant(recoveryUrl, false);
+
+        // Fall back to path-based match for cross-node lookups where host:port differs
+        if (record == null) {
+            try {
+                String lookupPath = new URI(recoveryUrl).getPath();
+                if (lookupPath != null) {
+                    record = findParticipantByRecoveryPath(lookupPath);
+                }
+            } catch (URISyntaxException e) {
+                // fall through to return null
+            }
+        }
+
+        return record != null ? record.getParticipantURI() : null;
+    }
+
+    /**
+     * Updates a participant's callbacks using path-based matching, without
+     * persisting to the local ObjectStore. This is used in HA mode where
+     * the caller manages persistence to the distributed store separately.
+     *
+     * @param newLinkHeader the new compensator link header
+     * @param recoveryUrl the recovery URL to identify the participant (may have different host:port)
+     * @return true if the participant was found and updated
+     */
+    public boolean updateParticipantCallbacks(String newLinkHeader, String recoveryUrl) {
+        // First try exact match
+        LRAParticipantRecord record = findLRAParticipant(recoveryUrl, false);
+
+        // Fall back to path-based match for cross-node lookups
+        if (record == null) {
+            try {
+                String lookupPath = new URI(recoveryUrl).getPath();
+                if (lookupPath != null) {
+                    record = findParticipantByRecoveryPath(lookupPath);
+                }
+            } catch (URISyntaxException e) {
+                // fall through
+            }
+        }
+
+        if (record != null) {
+            // updateCallbacks handles a single link; split multi-link headers
+            if (newLinkHeader.startsWith("<")) {
+                for (String link : newLinkHeader.split(",")) {
+                    record.updateCallbacks(link.trim());
+                }
+            } else {
+                record.updateCallbacks(newLinkHeader);
+            }
+            // Update participantPath so getParticipantURI() reflects the new
+            // URLs. This keeps the HA distributed store and getCompensator
+            // consistent with the non-HA lraParticipants map.
+            record.setParticipantPath(newLinkHeader);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Finds a participant record by matching the path portion of its recovery URI.
+     */
+    private LRAParticipantRecord findParticipantByRecoveryPath(String path) {
+        for (RecordList list : new RecordList[] { pendingList, preparedList, heuristicList, failedList }) {
+            if (list != null) {
+                RecordListIterator iter = new RecordListIterator(list);
+                AbstractRecord r;
+                while ((r = iter.iterate()) != null) {
+                    if (r instanceof LRAParticipantRecord) {
+                        LRAParticipantRecord pr = (LRAParticipantRecord) r;
+                        if (pr.getRecoveryURI() != null
+                                && path.equals(pr.getRecoveryURI().getPath())) {
+                            return pr;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
     public boolean updateRecoveryURI(String linkHeader, String recoveryUri) {
         LRAParticipantRecord lraRecord = findLRAParticipant(recoveryUri, false);
 
@@ -1281,6 +1446,72 @@ public class LongRunningAction extends BasicAction {
 
     public URI getParentId() {
         return parentId;
+    }
+
+    public LocalDateTime getStartTime() {
+        return startTime;
+    }
+
+    public LocalDateTime getFinishTime() {
+        return finishTime;
+    }
+
+    public long getTimeLimit() {
+        return timeLimit;
+    }
+
+    /**
+     * Sets the LRAStore for HA mode persistence.
+     * Called by LRAService when HA is enabled.
+     *
+     * @param lraStore the LRA store implementation
+     */
+    public void setLRAStore(LRAStore lraStore) {
+        this.lraStore = lraStore;
+    }
+
+    /**
+     * Converts this LongRunningAction to an LRAState for distributed storage.
+     * This is used in HA mode to persist the LRA state to the distributed store.
+     *
+     * @return LRAState representing this LRA
+     */
+    public LRAState toLRAState() throws IOException {
+        OutputObjectState oos = new OutputObjectState();
+        // Set guard to prevent save_state() from triggering a recursive
+        // Infinispan save — toLRAState() is only for serialization.
+        serializingForHA = true;
+        try {
+            if (!save_state(oos, 0)) {
+                throw new IOException("Failed to serialize LongRunningAction to OutputObjectState");
+            }
+        } finally {
+            serializingForHA = false;
+        }
+        return DefaultLRAState.fromLongRunningAction(this, oos, distributedVersion);
+    }
+
+    /**
+     * Restores this LongRunningAction from an LRAState loaded from distributed storage.
+     *
+     * @param state the LRAState to restore from
+     * @return true if restoration succeeded
+     */
+    public boolean fromLRAState(LRAState state) {
+        if (state == null) {
+            return false;
+        }
+
+        InputObjectState ios = state.toInputObjectState();
+        if (ios == null) {
+            return false;
+        }
+
+        boolean restored = restore_state(ios, 0);
+        if (restored) {
+            this.distributedVersion = state.getVersion();
+        }
+        return restored;
     }
 
     private boolean hasElements(RecordList list) {

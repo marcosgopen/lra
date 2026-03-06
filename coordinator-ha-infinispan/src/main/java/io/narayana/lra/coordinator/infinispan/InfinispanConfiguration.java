@@ -1,0 +1,372 @@
+/*
+   Copyright The Narayana Authors
+   SPDX-License-Identifier: Apache-2.0
+ */
+
+package io.narayana.lra.coordinator.infinispan;
+
+import io.narayana.lra.coordinator.domain.model.LRAState;
+import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
+import io.narayana.lra.logging.LRALogger;
+import jakarta.annotation.PreDestroy;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Produces;
+import jakarta.inject.Named;
+import javax.naming.InitialContext;
+import javax.naming.NameNotFoundException;
+import javax.naming.NamingException;
+import org.infinispan.Cache;
+import org.infinispan.configuration.cache.CacheMode;
+import org.infinispan.configuration.cache.ConfigurationBuilder;
+import org.infinispan.configuration.global.GlobalConfigurationBuilder;
+import org.infinispan.manager.DefaultCacheManager;
+import org.infinispan.manager.EmbeddedCacheManager;
+
+/**
+ * CDI configuration for Infinispan caches used in LRA HA mode.
+ *
+ * Creates and manages the following caches:
+ * - lra-active: Active LRAs (replicated)
+ * - lra-recovering: Recovering LRAs (replicated)
+ * - lra-failed: Failed LRAs (replicated)
+ */
+@ApplicationScoped
+public class InfinispanConfiguration {
+
+    public static final String ACTIVE_LRA_CACHE_NAME = "lra-active";
+    public static final String RECOVERING_LRA_CACHE_NAME = "lra-recovering";
+    public static final String FAILED_LRA_CACHE_NAME = "lra-failed";
+
+    private static final String JNDI_CACHE_CONTAINER = "java:jboss/infinispan/container/lra";
+
+    private EmbeddedCacheManager cacheManager;
+    private boolean initialized = false;
+    private boolean managedByContainer = false;
+
+    /**
+     * Initializes Infinispan cache manager and caches.
+     * Called automatically by CDI on startup.
+     */
+    public void initialize() {
+        if (initialized) {
+            return;
+        }
+
+        try {
+            // Check if HA mode is enabled
+            String haEnabled = System.getProperty("lra.coordinator.ha.enabled", "false");
+            if (!"true".equalsIgnoreCase(haEnabled)) {
+                LRALogger.logger.info("LRA HA mode is disabled, Infinispan will not be initialized");
+                return;
+            }
+
+            LRALogger.logger.info("Initializing Infinispan for LRA HA mode");
+
+            // Try WildFly subsystem mode first (JNDI lookup), fall back to embedded mode
+            if (initializeFromJndi()) {
+                initialized = true;
+                managedByContainer = true;
+                LRALogger.logger.info("Infinispan initialized via WildFly subsystem (JNDI)");
+                return;
+            }
+
+            initializeEmbedded();
+
+            initialized = true;
+        } catch (Exception e) {
+            LRALogger.logger.errorf(e, "Failed to initialize Infinispan for LRA HA mode");
+            throw new RuntimeException("Failed to initialize Infinispan", e);
+        }
+    }
+
+    /**
+     * Attempts to obtain the cache manager from WildFly's Infinispan subsystem via JNDI.
+     *
+     * @return true if the JNDI lookup succeeded and cacheManager was set
+     */
+    private boolean initializeFromJndi() {
+        try {
+            InitialContext ctx = new InitialContext();
+            cacheManager = (EmbeddedCacheManager) ctx.lookup(JNDI_CACHE_CONTAINER);
+            LRALogger.logger.infof("Found WildFly-managed Infinispan cache container at %s", JNDI_CACHE_CONTAINER);
+            return true;
+        } catch (NameNotFoundException e) {
+            LRALogger.logger.info("No WildFly Infinispan subsystem found, using embedded mode");
+            return false;
+        } catch (NamingException e) {
+            LRALogger.logger.infof("JNDI lookup failed (%s), using embedded mode", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Initializes an embedded Infinispan cache manager with JGroups transport.
+     * Used for standalone/Quarkus deployments where WildFly's subsystem is not available.
+     */
+    private void initializeEmbedded() {
+        // Get cluster name from system property or environment variable
+        String clusterName = System.getProperty("lra.coordinator.cluster.name",
+                System.getenv().getOrDefault("LRA_CLUSTER_NAME", "lra-cluster"));
+
+        // Build global configuration
+        GlobalConfigurationBuilder globalConfig = new GlobalConfigurationBuilder();
+
+        // Configure JGroups transport for clustering
+        String jgroupsConfig = System.getProperty("lra.coordinator.jgroups.config");
+        if (jgroupsConfig != null && !jgroupsConfig.isEmpty()) {
+            globalConfig
+                    .transport()
+                    .defaultTransport()
+                    .clusterName(clusterName)
+                    .nodeName(getNodeName())
+                    .addProperty("configurationFile", jgroupsConfig);
+        } else {
+            globalConfig
+                    .transport()
+                    .defaultTransport()
+                    .clusterName(clusterName)
+                    .nodeName(getNodeName());
+        }
+
+        // Set JGroups bind address if specified
+        String bindAddr = System.getProperty("lra.coordinator.jgroups.bind_addr",
+                System.getProperty("jgroups.bind_addr", "127.0.0.1"));
+        System.setProperty("jgroups.bind_addr", bindAddr);
+
+        // Use ProtoStream for type-safe, schema-based serialization.
+        // Load the generated initializer via reflection to avoid a hard class
+        // dependency on protostream APIs, which may not be visible to the WAR
+        // classloader in WildFly subsystem mode (where embedded mode is unused).
+        try {
+            Class<?> initClass = Class.forName(
+                    "io.narayana.lra.coordinator.infinispan.LRASchemaInitializerImpl");
+            Object initializer = initClass.getDeclaredConstructor().newInstance();
+            // addContextInitializer accepts SerializationContextInitializer
+            globalConfig.serialization()
+                    .getClass()
+                    .getMethod("addContextInitializer",
+                            Class.forName("org.infinispan.protostream.SerializationContextInitializer"))
+                    .invoke(globalConfig.serialization(), initializer);
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Failed to load LRASchemaInitializerImpl — "
+                    + "ProtoStream serialization will not be available");
+        }
+
+        globalConfig
+                .globalState()
+                .enable()
+                .persistentLocation(getPersistentLocation());
+
+        globalConfig
+                .cacheContainer()
+                .statistics(true);
+
+        cacheManager = new DefaultCacheManager(globalConfig.build());
+
+        LRALogger.logger.infof("Infinispan cluster members: %s",
+                cacheManager.getMembers());
+
+        // Get cache mode from configuration (default: REPL_SYNC)
+        CacheMode cacheMode = getCacheMode();
+
+        // Define cache configurations with partition handling
+        ConfigurationBuilder activeCacheConfig = new ConfigurationBuilder();
+        activeCacheConfig
+                .clustering()
+                .cacheMode(cacheMode)
+                .partitionHandling()
+                .whenSplit(org.infinispan.partitionhandling.PartitionHandling.DENY_READ_WRITES)
+                .mergePolicy(org.infinispan.conflict.MergePolicy.PREFERRED_ALWAYS)
+                .expiration()
+                .lifespan(-1)
+                .memory()
+                .maxCount(10000);
+
+        ConfigurationBuilder recoveringCacheConfig = new ConfigurationBuilder();
+        recoveringCacheConfig
+                .clustering()
+                .cacheMode(cacheMode)
+                .partitionHandling()
+                .whenSplit(org.infinispan.partitionhandling.PartitionHandling.DENY_READ_WRITES)
+                .mergePolicy(org.infinispan.conflict.MergePolicy.PREFERRED_ALWAYS)
+                .expiration()
+                .lifespan(-1)
+                .memory()
+                .maxCount(10000);
+
+        ConfigurationBuilder failedCacheConfig = new ConfigurationBuilder();
+        failedCacheConfig
+                .clustering()
+                .cacheMode(cacheMode)
+                .partitionHandling()
+                .whenSplit(org.infinispan.partitionhandling.PartitionHandling.DENY_READ_WRITES)
+                .mergePolicy(org.infinispan.conflict.MergePolicy.PREFERRED_ALWAYS)
+                .expiration()
+                .lifespan(-1)
+                .memory()
+                .maxCount(1000);
+
+        // Create caches
+        cacheManager.defineConfiguration(ACTIVE_LRA_CACHE_NAME, activeCacheConfig.build());
+        cacheManager.defineConfiguration(RECOVERING_LRA_CACHE_NAME, recoveringCacheConfig.build());
+        cacheManager.defineConfiguration(FAILED_LRA_CACHE_NAME, failedCacheConfig.build());
+
+        LRALogger.logger.infof("Infinispan initialized in embedded mode for cluster '%s' with node name '%s'",
+                clusterName, getNodeName());
+        LRALogger.logger.info("Partition handling enabled: DENY_READ_WRITES strategy - " +
+                "minority partitions will deny all operations to prevent split-brain");
+    }
+
+    /**
+     * Produces the cache manager bean.
+     *
+     * @return the cache manager
+     */
+    @Produces
+    @ApplicationScoped
+    @Named("lraCacheManager")
+    public EmbeddedCacheManager cacheManager() {
+        if (!initialized) {
+            initialize();
+        }
+        return cacheManager;
+    }
+
+    /**
+     * Produces the active LRA cache bean.
+     *
+     * @return the active LRA cache
+     */
+    @Produces
+    @ApplicationScoped
+    @Named("activeLRACache")
+    public Cache<String, LRAState> activeLRACache() {
+        if (!initialized) {
+            initialize();
+        }
+        return cacheManager != null ? cacheManager.getCache(ACTIVE_LRA_CACHE_NAME) : null;
+    }
+
+    /**
+     * Produces the recovering LRA cache bean.
+     *
+     * @return the recovering LRA cache
+     */
+    @Produces
+    @ApplicationScoped
+    @Named("recoveringLRACache")
+    public Cache<String, LRAState> recoveringLRACache() {
+        if (!initialized) {
+            initialize();
+        }
+        return cacheManager != null ? cacheManager.getCache(RECOVERING_LRA_CACHE_NAME) : null;
+    }
+
+    /**
+     * Produces the failed LRA cache bean.
+     *
+     * @return the failed LRA cache
+     */
+    @Produces
+    @ApplicationScoped
+    @Named("failedLRACache")
+    public Cache<String, LRAState> failedLRACache() {
+        if (!initialized) {
+            initialize();
+        }
+        return cacheManager != null ? cacheManager.getCache(FAILED_LRA_CACHE_NAME) : null;
+    }
+
+    /**
+     * Produces the cluster coordinator bean.
+     *
+     * @return the cluster coordinator
+     */
+    @Produces
+    @ApplicationScoped
+    public ClusterCoordinationService clusterCoordinator() {
+        if (!initialized) {
+            initialize();
+        }
+        if (cacheManager == null) {
+            return null;
+        }
+        InfinispanClusterCoordinator coordinator = new InfinispanClusterCoordinator();
+        coordinator.initialize(cacheManager);
+        return coordinator;
+    }
+
+    /**
+     * Checks if Infinispan is initialized.
+     *
+     * @return true if initialized
+     */
+    public boolean isInitialized() {
+        return initialized;
+    }
+
+    /**
+     * Gets the node name for this coordinator instance.
+     *
+     * @return the node name
+     */
+    private String getNodeName() {
+        String nodeName = System.getProperty("lra.coordinator.node.id");
+        if (nodeName == null || nodeName.isEmpty()) {
+            nodeName = System.getenv("HOSTNAME");
+        }
+        if (nodeName == null || nodeName.isEmpty()) {
+            nodeName = "lra-coordinator-" + System.currentTimeMillis();
+        }
+        return nodeName;
+    }
+
+    /**
+     * Gets the persistent location for Infinispan state.
+     * Each node uses a separate directory to avoid file locking conflicts
+     * when multiple coordinators run on the same host.
+     *
+     * @return the persistent location
+     */
+    private String getPersistentLocation() {
+        String location = System.getProperty("lra.coordinator.infinispan.persistent.location");
+        if (location == null || location.isEmpty()) {
+            location = System.getProperty("java.io.tmpdir") + "/lra-infinispan-" + getNodeName();
+        }
+        return location;
+    }
+
+    /**
+     * Gets the cache mode from configuration.
+     * Supported modes: REPL_SYNC, REPL_ASYNC, DIST_SYNC, DIST_ASYNC, LOCAL
+     *
+     * System property: lra.coordinator.infinispan.cache.mode
+     * Default: REPL_SYNC
+     *
+     * @return the configured cache mode
+     */
+    private CacheMode getCacheMode() {
+        String mode = System.getProperty("lra.coordinator.infinispan.cache.mode", "REPL_SYNC");
+
+        try {
+            CacheMode cacheMode = CacheMode.valueOf(mode.toUpperCase());
+            LRALogger.logger.infof("Infinispan cache mode: %s", cacheMode);
+            return cacheMode;
+        } catch (IllegalArgumentException e) {
+            LRALogger.logger.warnf("Invalid cache mode '%s', using default REPL_SYNC. " +
+                    "Valid modes are: REPL_SYNC, REPL_ASYNC, DIST_SYNC, DIST_ASYNC, LOCAL", mode);
+            return CacheMode.REPL_SYNC;
+        }
+    }
+
+    /**
+     * Stops the cache manager on shutdown.
+     */
+    @PreDestroy
+    public void shutdown() {
+        if (cacheManager != null && !managedByContainer) {
+            LRALogger.logger.info("Stopping Infinispan cache manager");
+            cacheManager.stop();
+        }
+    }
+}

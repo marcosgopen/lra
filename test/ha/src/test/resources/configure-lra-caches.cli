@@ -1,0 +1,22 @@
+## WildFly CLI script to configure Infinispan caches for LRA HA mode.
+## Run via: jboss-cli.sh --file=configure-lra-caches.cli
+## The embed-server / stop-embedded-server commands are included so this
+## script works in offline mode (no running WildFly instance required).
+## Idempotent: skips configuration if the lra cache container already exists.
+
+embed-server --server-config=standalone-ha.xml --std-out=discard
+
+if (outcome != success) of /subsystem=infinispan/cache-container=lra:read-resource
+    batch
+    /subsystem=infinispan/cache-container=lra:add(default-cache=lra-active)
+    /subsystem=infinispan/cache-container=lra/transport=jgroups:add()
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-active:add()
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-active/component=partition-handling:add(when-split=DENY_READ_WRITES)
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-recovering:add()
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-recovering/component=partition-handling:add(when-split=DENY_READ_WRITES)
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-failed:add()
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-failed/component=partition-handling:add(when-split=DENY_READ_WRITES)
+    run-batch
+end-if
+
+stop-embedded-server

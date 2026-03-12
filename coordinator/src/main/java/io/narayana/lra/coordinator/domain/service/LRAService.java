@@ -27,6 +27,8 @@ import jakarta.ws.rs.core.Response;
 import java.io.UnsupportedEncodingException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -45,40 +47,56 @@ public class LRAService {
     private LRARecoveryModule recoveryModule;
 
     public LongRunningAction getTransaction(URI lraId) throws NotFoundException {
-        if (!lras.containsKey(lraId)) {
-            String uid = LRAConstants.getLRAUid(lraId);
-
-            if (uid == null || uid.isEmpty()) {
-                String errorMsg = LRALogger.i18nLogger.warn_invalid_uri(
-                        String.valueOf(lraId), "LongRunningAction.getTransaction");
-                throw new NotFoundException(errorMsg, // 404
-                        Response.status(NOT_FOUND).entity(errorMsg).build());
-            }
-
-            // try comparing on uid since different URIs can map to the same resource
-            // (eg localhost versus 127.0.0.1 versus :1 etc)
-            for (LongRunningAction lra : lras.values()) {
-                if (uid.equals(lra.get_uid().fileStringForm())) {
-                    return lra;
-                }
-            }
-
-            if (!recoveringLRAs.containsKey(lraId)) {
-                for (LongRunningAction lra : recoveringLRAs.values()) {
-                    if (uid.equals(lra.get_uid().fileStringForm())) {
-                        return lra;
-                    }
-                }
-
-                String errorMsg = "Cannot find transaction id: " + lraId;
-                throw new NotFoundException(errorMsg,
-                        Response.status(NOT_FOUND).entity(errorMsg).build());
-            }
-
-            return recoveringLRAs.get(lraId);
+        // Fast path: check active LRAs first (atomic get)
+        LongRunningAction lra = lras.get(lraId);
+        if (lra != null) {
+            return lra;
         }
 
-        return lras.get(lraId);
+        // Check recovering LRAs (atomic get)
+        lra = recoveringLRAs.get(lraId);
+        if (lra != null) {
+            return lra;
+        }
+
+        // Extract UID for alternative lookups
+        String uid = LRAConstants.getLRAUid(lraId);
+        if (uid == null || uid.isEmpty()) {
+            String errorMsg = LRALogger.i18nLogger.warn_invalid_uri(
+                    String.valueOf(lraId), "LongRunningAction.getTransaction");
+            throw new NotFoundException(errorMsg,
+                    Response.status(NOT_FOUND).entity(errorMsg).build());
+        }
+
+        // Try comparing on UID since different URIs can map to the same resource
+        // (e.g., localhost vs 127.0.0.1 vs ::1)
+        lra = findByUid(lras, uid);
+        if (lra != null) {
+            return lra;
+        }
+
+        lra = findByUid(recoveringLRAs, uid);
+        if (lra != null) {
+            return lra;
+        }
+
+        // Not found in local memory
+        String errorMsg = "Cannot find transaction id: " + lraId;
+        throw new NotFoundException(errorMsg,
+                Response.status(NOT_FOUND).entity(errorMsg).build());
+    }
+
+    /**
+     * Helper method to find an LRA by UID in a map.
+     * This handles cases where the URI format differs but the UID is the same.
+     */
+    private LongRunningAction findByUid(Map<URI, LongRunningAction> map, String uid) {
+        for (LongRunningAction lra : map.values()) {
+            if (uid.equals(lra.get_uid().fileStringForm())) {
+                return lra;
+            }
+        }
+        return null;
     }
 
     public LongRunningAction lookupTransaction(URI lraId) {
@@ -124,16 +142,23 @@ public class LRAService {
     }
 
     public List<LRAData> getAll(LRAStatus lraStatus) {
+        Map<URI, LRAData> result = new LinkedHashMap<>();
+
         if (lraStatus == null) {
-            List<LRAData> all = lras.values().stream()
-                    .map(LongRunningAction::getLRAData).collect(toList());
-            all.addAll(getAllRecovering());
-            return all;
+            lras.values().stream()
+                    .map(LongRunningAction::getLRAData)
+                    .forEach(d -> result.put(d.getLraId(), d));
+            recoveringLRAs.values().stream()
+                    .map(LongRunningAction::getLRAData)
+                    .forEach(d -> result.put(d.getLraId(), d));
+        } else {
+            getDataByStatus(lras, lraStatus)
+                    .forEach(d -> result.put(d.getLraId(), d));
+            getDataByStatus(recoveringLRAs, lraStatus)
+                    .forEach(d -> result.put(d.getLraId(), d));
         }
 
-        List<LRAData> allByStatus = getDataByStatus(lras, lraStatus);
-        allByStatus.addAll(getDataByStatus(recoveringLRAs, lraStatus));
-        return allByStatus;
+        return new ArrayList<>(result.values());
     }
 
     /**
@@ -469,9 +494,11 @@ public class LRAService {
     }
 
     public int renewTimeLimit(URI lraId, Long timelimit) {
-        LongRunningAction lra = lras.get(lraId);
+        LongRunningAction lra;
 
-        if (lra == null) {
+        try {
+            lra = getTransaction(lraId);
+        } catch (NotFoundException e) {
             return NOT_FOUND.getStatusCode();
         }
 
@@ -479,11 +506,15 @@ public class LRAService {
     }
 
     public List<LRAData> getFailedLRAs() {
-        Map<URI, LongRunningAction> failedLRAs = new ConcurrentHashMap<>();
+        Map<URI, LRAData> result = new LinkedHashMap<>();
 
-        getRM().getFailedLRAs(failedLRAs);
+        Map<URI, LongRunningAction> localFailed = new ConcurrentHashMap<>();
+        getRM().getFailedLRAs(localFailed);
+        localFailed.values().stream()
+                .map(LongRunningAction::getLRAData)
+                .forEach(d -> result.put(d.getLraId(), d));
 
-        return failedLRAs.values().stream().map(LongRunningAction::getLRAData).collect(toList());
+        return new ArrayList<>(result.values());
     }
 
     private LRARecoveryModule getRM() {

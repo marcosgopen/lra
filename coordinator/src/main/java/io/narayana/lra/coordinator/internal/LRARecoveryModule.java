@@ -20,6 +20,7 @@ import io.narayana.lra.coordinator.domain.model.FailedLongRunningAction;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.domain.service.LRAService;
 import io.narayana.lra.logging.LRALogger;
+import jakarta.enterprise.inject.spi.CDI;
 import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
@@ -28,7 +29,15 @@ import java.util.Map;
 import java.util.function.Consumer;
 import org.eclipse.microprofile.lra.annotation.LRAStatus;
 
-public class LRARecoveryModule implements RecoveryModule {
+public class LRARecoveryModule implements RecoveryModule,
+        ClusterCoordinationService.CoordinatorChangeListener {
+
+    // HA components
+    private ClusterCoordinationService clusterCoordinator;
+    private volatile boolean isRecoveryLeader = false;
+    private volatile boolean haEnabled = false;
+    private volatile boolean haInitAttempted = false;
+
     public LRARecoveryModule() {
         service = new LRAService();
 
@@ -38,10 +47,118 @@ public class LRARecoveryModule implements RecoveryModule {
 
         _transactionStatusConnectionMgr = new TransactionStatusConnectionManager();
         Implementations.install();
+
+        // HA initialization is deferred to ensureHAInitialized() because this
+        // constructor runs on a ServerService thread during deployment, before
+        // CDI has finished processing the WAR's bean archives. Attempting
+        // CDI.current().select(LRAStore.class) at this point fails with an
+        // UnsatisfiedResolutionException because the InfinispanStore bean
+        // (in WEB-INF/lib/coordinator-ha-infinispan.jar) hasn't been
+        // discovered yet.
+    }
+
+    /**
+     * Ensures HA components are initialized exactly once. This is called
+     * lazily (not from the constructor) because the constructor runs on a
+     * WildFly ServerService thread during deployment, before CDI has
+     * finished discovering beans in the WAR's library JARs.
+     */
+    private void ensureHAInitialized() {
+        if (!"true".equalsIgnoreCase(System.getProperty("lra.coordinator.ha.enabled", "false"))) {
+            return;
+        }
+        if (haInitAttempted) {
+            return;
+        }
+        synchronized (this) {
+            if (haInitAttempted) {
+                return;
+            }
+            // initializeHAComponents sets haInitAttempted = true only when
+            // initialization succeeds. If CDI beans are not yet available
+            // (e.g. called during deployment before bean discovery completes),
+            // haInitAttempted stays false so the next call retries.
+            initializeHAComponents();
+        }
+    }
+
+    /**
+     * Initializes HA components by looking up ClusterCoordinationService
+     * via CDI. Only called when HA mode is enabled — the caller
+     * ({@link #ensureHAInitialized()}) guards on the system property.
+     *
+     * <p>
+     * Sets {@code haInitAttempted = true} only on success. If CDI beans are
+     * not yet available (e.g. during early deployment), returns without
+     * setting the flag so that the next call retries.
+     * </p>
+     */
+    private void initializeHAComponents() {
+        try {
+            // Try to get CDI container
+            CDI<Object> cdi = CDI.current();
+
+            // Try to get cluster coordinator from CDI
+            this.clusterCoordinator = tryGetBean(cdi, ClusterCoordinationService.class);
+
+            if (clusterCoordinator == null) {
+                // Bean not available yet — this is expected when called during
+                // deployment before CDI has finished processing bean archives.
+                // Leave haInitAttempted false so the next call retries.
+                LRALogger.logger.warn("HA mode is enabled (lra.coordinator.ha.enabled=true) "
+                        + "but ClusterCoordinationService bean is not available yet. "
+                        + "Will retry on next access.");
+                return;
+            }
+
+            this.haEnabled = true;
+            service.initializeHA(clusterCoordinator);
+
+            // Register for cluster coordinator change notifications
+            if (clusterCoordinator != null && clusterCoordinator.isInitialized()) {
+                clusterCoordinator.addCoordinatorChangeListener(this);
+                // Seed isRecoveryLeader from the coordinator's current state so
+                // recovery works immediately without waiting for a view change event
+                this.isRecoveryLeader = clusterCoordinator.isCoordinator();
+                LRALogger.logger.info("LRARecoveryModule registered for cluster coordinator notifications");
+            } else {
+                // No cluster coordinator available (single-node HA, CDI lookup
+                // failure, or JGroups not configured). This node must assume
+                // recovery leadership, otherwise recovery never runs because
+                // onBecameCoordinator() is never called.
+                this.isRecoveryLeader = true;
+                LRALogger.logger.info(
+                        "LRARecoveryModule: no cluster coordinator available, assuming recovery leadership");
+            }
+
+            haInitAttempted = true;
+            LRALogger.logger.info("LRARecoveryModule initialized with HA components");
+        } catch (IllegalStateException e) {
+            // CDI not available yet — leave haInitAttempted false to retry later
+            LRALogger.logger.warn("HA mode is enabled but CDI is not available yet. "
+                    + "Will retry on next access.");
+        } catch (Exception e) {
+            // Unexpected failure — leave haInitAttempted false to retry later
+            LRALogger.logger.warn("HA mode is enabled but initialization failed, will retry on next access", e);
+        }
+    }
+
+    /**
+     * Safely tries to get a CDI bean, returning null if not available.
+     */
+    private <T> T tryGetBean(CDI<Object> cdi, Class<T> beanClass) {
+        try {
+            return cdi.select(beanClass).get();
+        } catch (Exception e) {
+            LRALogger.logger.debugf("Bean %s not available: %s", beanClass.getSimpleName(), e.getMessage());
+            return null;
+        }
     }
 
     public static LRAService getService() {
-        return getInstance().service; // this call triggers the creation of the LRARecoveryModule singleton which contains service
+        LRARecoveryModule instance = getInstance();
+        instance.ensureHAInitialized();
+        return instance.service;
     }
 
     public static LRARecoveryModule getInstance() {
@@ -83,15 +200,78 @@ public class LRARecoveryModule implements RecoveryModule {
         }
     }
 
+    /**
+     * Periodic recovery pass - performs recovery of LRA transactions.
+     * In HA mode, only the cluster coordinator performs recovery to avoid conflicts.
+     */
     public void periodicWorkSecondPass() {
+        ensureHAInitialized();
+
         if (LRALogger.logger.isTraceEnabled()) {
             LRALogger.logger.trace("LRARecoveryModule: second pass");
         }
 
+        // In HA mode, only the cluster coordinator performs recovery
+        if (haEnabled && !isRecoveryLeader) {
+            if (LRALogger.logger.isTraceEnabled()) {
+                LRALogger.logger.trace("LRARecoveryModule: skipping recovery (not the cluster coordinator)");
+            }
+            return;
+        }
+
+        // Recover pending transactions
         recoverTransactions();
     }
 
+    // CoordinatorChangeListener implementation for JGroups coordinator election
+
+    /**
+     * Called when this node becomes the cluster coordinator.
+     * Immediately triggers a recovery pass.
+     */
+    @Override
+    public void onBecameCoordinator() {
+        isRecoveryLeader = true;
+        LRALogger.logger.info("LRARecoveryModule: This node became the cluster coordinator, starting immediate recovery");
+
+        // Perform immediate recovery pass when becoming coordinator
+        try {
+            recoverTransactions();
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Error during immediate recovery after becoming coordinator");
+        }
+    }
+
+    /**
+     * Called when this node loses cluster coordinator status.
+     * Stops performing recovery.
+     */
+    @Override
+    public void onLostCoordinator() {
+        isRecoveryLeader = false;
+        LRALogger.logger.info("LRARecoveryModule: This node lost cluster coordinator status, stopping recovery");
+    }
+
+    /**
+     * Recovers LRA transactions.
+     * In HA mode, loads from distributed store.
+     * In single-instance mode, loads from ObjectStore.
+     */
     private synchronized void recoverTransactions() {
+        recoverTransactionsFromObjectStore();
+    }
+
+    /**
+     * Recovers LRAs from ObjectStore.
+     * In HA mode with InfinispanSlots as the BackingSlots implementation,
+     * the ObjectStore reads from the replicated Infinispan cache, so all
+     * coordinators see the same data. Only the recovery leader runs this.
+     */
+    private void recoverTransactionsFromObjectStore() {
+        if (LRALogger.logger.isDebugEnabled()) {
+            LRALogger.logger.debug("LRARecoveryModule: recovering transactions from ObjectStore");
+        }
+
         // uids per transaction type
         InputObjectState aa_uids = new InputObjectState();
 
@@ -142,6 +322,10 @@ public class LRARecoveryModule implements RecoveryModule {
         }
     }
 
+    /**
+     * Moves an LRA entry to the failed LRA path.
+     * Overloaded version that takes a Uid (for ObjectStore).
+     */
     public boolean moveEntryToFailedLRAPath(final Uid failedUid) {
         String failedLRAType = FailedLongRunningAction.FAILED_LRA_TYPE;
         boolean moved = false;
@@ -172,6 +356,15 @@ public class LRARecoveryModule implements RecoveryModule {
             LRALogger.i18nLogger.warn_move_lra_record(failedUid.toString(), e.getMessage());
         }
         return moved;
+    }
+
+    /**
+     * Moves an LRA entry to the failed state via ObjectStore.
+     */
+    private boolean moveEntryToFailedLRAPath(URI lraId) {
+        String uidString = io.narayana.lra.LRAConstants.getLRAUid(lraId);
+        Uid uid = new Uid(uidString);
+        return moveEntryToFailedLRAPath(uid);
     }
 
     private Collection<Uid> processTransactions(InputObjectState uids) {
@@ -235,6 +428,26 @@ public class LRARecoveryModule implements RecoveryModule {
 
     public void recover() {
         recoverTransactions();
+    }
+
+    /**
+     * Checks if this node is the current recovery leader.
+     * In HA mode, only the Raft leader performs recovery.
+     * In single-instance mode, always returns true.
+     *
+     * @return true if this node is performing recovery
+     */
+    public boolean isRecoveryLeader() {
+        return !haEnabled || isRecoveryLeader;
+    }
+
+    /**
+     * Checks if HA mode is enabled.
+     *
+     * @return true if HA is enabled
+     */
+    public boolean isHaEnabled() {
+        return haEnabled;
     }
 
     public void getFailedLRAs(Map<URI, LongRunningAction> lras) {

@@ -19,6 +19,7 @@ import io.narayana.lra.LRAConstants;
 import io.narayana.lra.LRAData;
 import io.narayana.lra.coordinator.domain.model.LRAParticipantRecord;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
+import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
 import io.narayana.lra.coordinator.internal.LRARecoveryModule;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.ws.rs.NotFoundException;
@@ -27,6 +28,8 @@ import jakarta.ws.rs.core.Response;
 import java.io.UnsupportedEncodingException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -44,41 +47,62 @@ public class LRAService {
     private final Map<LongRunningAction, Map<String, String>> lraParticipants = new ConcurrentHashMap<>();
     private LRARecoveryModule recoveryModule;
 
+    // HA components (injected by LRARecoveryModule when HA is enabled)
+    private ClusterCoordinationService clusterCoordinator;
+    private String nodeId;
+    private boolean haEnabled = false;
+
     public LongRunningAction getTransaction(URI lraId) throws NotFoundException {
-        if (!lras.containsKey(lraId)) {
-            String uid = LRAConstants.getLRAUid(lraId);
-
-            if (uid == null || uid.isEmpty()) {
-                String errorMsg = LRALogger.i18nLogger.warn_invalid_uri(
-                        String.valueOf(lraId), "LongRunningAction.getTransaction");
-                throw new NotFoundException(errorMsg, // 404
-                        Response.status(NOT_FOUND).entity(errorMsg).build());
-            }
-
-            // try comparing on uid since different URIs can map to the same resource
-            // (eg localhost versus 127.0.0.1 versus :1 etc)
-            for (LongRunningAction lra : lras.values()) {
-                if (uid.equals(lra.get_uid().fileStringForm())) {
-                    return lra;
-                }
-            }
-
-            if (!recoveringLRAs.containsKey(lraId)) {
-                for (LongRunningAction lra : recoveringLRAs.values()) {
-                    if (uid.equals(lra.get_uid().fileStringForm())) {
-                        return lra;
-                    }
-                }
-
-                String errorMsg = "Cannot find transaction id: " + lraId;
-                throw new NotFoundException(errorMsg,
-                        Response.status(NOT_FOUND).entity(errorMsg).build());
-            }
-
-            return recoveringLRAs.get(lraId);
+        // Fast path: check active LRAs first (atomic get)
+        LongRunningAction lra = lras.get(lraId);
+        if (lra != null) {
+            return lra;
         }
 
-        return lras.get(lraId);
+        // Check recovering LRAs (atomic get)
+        lra = recoveringLRAs.get(lraId);
+        if (lra != null) {
+            return lra;
+        }
+
+        // Extract UID for alternative lookups
+        String uid = LRAConstants.getLRAUid(lraId);
+        if (uid == null || uid.isEmpty()) {
+            String errorMsg = LRALogger.i18nLogger.warn_invalid_uri(
+                    String.valueOf(lraId), "LongRunningAction.getTransaction");
+            throw new NotFoundException(errorMsg,
+                    Response.status(NOT_FOUND).entity(errorMsg).build());
+        }
+
+        // Try comparing on UID since different URIs can map to the same resource
+        // (e.g., localhost vs 127.0.0.1 vs ::1)
+        lra = findByUid(lras, uid);
+        if (lra != null) {
+            return lra;
+        }
+
+        lra = findByUid(recoveringLRAs, uid);
+        if (lra != null) {
+            return lra;
+        }
+
+        // Not found in local memory
+        String errorMsg = "Cannot find transaction id: " + lraId;
+        throw new NotFoundException(errorMsg,
+                Response.status(NOT_FOUND).entity(errorMsg).build());
+    }
+
+    /**
+     * Helper method to find an LRA by UID in a map.
+     * This handles cases where the URI format differs but the UID is the same.
+     */
+    private LongRunningAction findByUid(Map<URI, LongRunningAction> map, String uid) {
+        for (LongRunningAction lra : map.values()) {
+            if (uid.equals(lra.get_uid().fileStringForm())) {
+                return lra;
+            }
+        }
+        return null;
     }
 
     public LongRunningAction lookupTransaction(URI lraId) {
@@ -124,16 +148,23 @@ public class LRAService {
     }
 
     public List<LRAData> getAll(LRAStatus lraStatus) {
+        Map<URI, LRAData> result = new LinkedHashMap<>();
+
         if (lraStatus == null) {
-            List<LRAData> all = lras.values().stream()
-                    .map(LongRunningAction::getLRAData).collect(toList());
-            all.addAll(getAllRecovering());
-            return all;
+            lras.values().stream()
+                    .map(LongRunningAction::getLRAData)
+                    .forEach(d -> result.put(d.getLraId(), d));
+            recoveringLRAs.values().stream()
+                    .map(LongRunningAction::getLRAData)
+                    .forEach(d -> result.put(d.getLraId(), d));
+        } else {
+            getDataByStatus(lras, lraStatus)
+                    .forEach(d -> result.put(d.getLraId(), d));
+            getDataByStatus(recoveringLRAs, lraStatus)
+                    .forEach(d -> result.put(d.getLraId(), d));
         }
 
-        List<LRAData> allByStatus = getDataByStatus(lras, lraStatus);
-        allByStatus.addAll(getDataByStatus(recoveringLRAs, lraStatus));
-        return allByStatus;
+        return new ArrayList<>(result.values());
     }
 
     /**
@@ -260,6 +291,41 @@ public class LRAService {
         }
 
         return null;
+    }
+
+    /**
+     * Extracts the LRA UID from an LRA ID URI.
+     * Handles both full URIs (http://host/lra-coordinator/uid) and
+     * UID-only values (uid) as used by recovery URL path parameters.
+     */
+    private String extractLraUid(URI lraId) {
+        if (lraId == null) {
+            return null;
+        }
+        String uid = LRAConstants.getLRAUid(lraId);
+        return (uid != null && !uid.isEmpty()) ? uid : null;
+    }
+
+    /**
+     * Extracts the LRA UID segment from a recovery URL.
+     * Recovery URL format: {base}/lra-coordinator/recovery/{lraUid}/{participantUid}
+     * The LRA UID is the second-to-last path segment.
+     */
+    private String extractLraUidFromRecoveryUrl(String recoveryUrl) {
+        try {
+            URI uri = new URI(recoveryUrl);
+            String path = uri.getPath();
+            if (path == null) {
+                return null;
+            }
+            String[] segments = path.split("/");
+            if (segments.length < 2) {
+                return null;
+            }
+            return segments[segments.length - 2];
+        } catch (URISyntaxException e) {
+            return null;
+        }
     }
 
     public synchronized LongRunningAction startLRA(String baseUri, URI parentLRA, String clientId, Long timelimit) {
@@ -469,9 +535,11 @@ public class LRAService {
     }
 
     public int renewTimeLimit(URI lraId, Long timelimit) {
-        LongRunningAction lra = lras.get(lraId);
+        LongRunningAction lra;
 
-        if (lra == null) {
+        try {
+            lra = getTransaction(lraId);
+        } catch (NotFoundException e) {
             return NOT_FOUND.getStatusCode();
         }
 
@@ -479,11 +547,15 @@ public class LRAService {
     }
 
     public List<LRAData> getFailedLRAs() {
-        Map<URI, LongRunningAction> failedLRAs = new ConcurrentHashMap<>();
+        Map<URI, LRAData> result = new LinkedHashMap<>();
 
-        getRM().getFailedLRAs(failedLRAs);
+        Map<URI, LongRunningAction> localFailed = new ConcurrentHashMap<>();
+        getRM().getFailedLRAs(localFailed);
+        localFailed.values().stream()
+                .map(LongRunningAction::getLRAData)
+                .forEach(d -> result.put(d.getLraId(), d));
 
-        return failedLRAs.values().stream().map(LongRunningAction::getLRAData).collect(toList());
+        return new ArrayList<>(result.values());
     }
 
     private LRARecoveryModule getRM() {
@@ -498,5 +570,78 @@ public class LRAService {
     private List<LRAData> getDataByStatus(Map<URI, LongRunningAction> lrasToFilter, LRAStatus status) {
         return lrasToFilter.values().stream().filter(t -> t.getLRAStatus() == status)
                 .map(LongRunningAction::getLRAData).collect(toList());
+    }
+
+    // HA-related methods
+
+    /**
+     * Initializes HA components and node ID.
+     * Called by LRARecoveryModule when HA is enabled.
+     *
+     * @param clusterCoordinator the cluster coordinator
+     */
+    public void initializeHA(ClusterCoordinationService clusterCoordinator) {
+        this.clusterCoordinator = clusterCoordinator;
+        this.haEnabled = true;
+
+        // Initialize node ID
+        initializeNodeId();
+
+        LRALogger.logger.infof("LRAService initialized with HA mode, node ID: %s", nodeId);
+    }
+
+    /**
+     * Initializes the node ID for this coordinator instance. Tries in order:
+     * 1. System property: lra.coordinator.node.id
+     * 2. Narayana node identifier
+     */
+    private void initializeNodeId() {
+        // Try system property first
+        nodeId = System.getProperty("lra.coordinator.node.id");
+
+        if (nodeId == null || nodeId.isEmpty()) {
+            // Fallback to Narayana node identifier
+            try {
+                String narayanaNodeId = com.arjuna.ats.arjuna.common.arjPropertyManager
+                        .getCoreEnvironmentBean().getNodeIdentifier();
+                nodeId = "node-" + narayanaNodeId;
+            } catch (Exception e) {
+                // Final fallback
+                nodeId = "node-" + System.currentTimeMillis();
+                LRALogger.logger.warnf("Failed to get Narayana node identifier, using timestamp: %s", nodeId);
+            }
+        }
+
+        LRALogger.logger.infof("Initialized coordinator node ID: %s", nodeId);
+    }
+
+    /**
+     * Gets the node ID for this coordinator instance.
+     *
+     * @return the node ID
+     */
+    public String getNodeId() {
+        if (nodeId == null) {
+            initializeNodeId();
+        }
+        return nodeId;
+    }
+
+    /**
+     * Checks if HA mode is enabled.
+     *
+     * @return true if HA is enabled
+     */
+    public boolean isHaEnabled() {
+        return haEnabled;
+    }
+
+    /**
+     * Gets the cluster coordinator (may be null if HA is disabled).
+     *
+     * @return the cluster coordinator or null
+     */
+    public ClusterCoordinationService getClusterCoordinator() {
+        return clusterCoordinator;
     }
 }

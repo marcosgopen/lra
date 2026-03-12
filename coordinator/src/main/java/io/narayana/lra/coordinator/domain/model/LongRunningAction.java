@@ -73,6 +73,25 @@ public class LongRunningAction extends BasicAction {
         }
     }
 
+    /**
+     * Builds the UID path segment of the LRA ID.
+     * In HA mode, embeds the node ID: {NodeId}/{Uid}
+     * In single-instance mode, uses just: {Uid}
+     *
+     * @param lraService the LRAService
+     * @return the UID path segment
+     */
+    private String buildUidPath(LRAService lraService) {
+        String uidString = get_uid().fileStringForm();
+
+        if (lraService != null && lraService.isHaEnabled()) {
+            String nodeId = lraService.getNodeId();
+            return String.format("%s/%s", nodeId, uidString);
+        } else {
+            return uidString;
+        }
+    }
+
     public LongRunningAction(LRAService lraService, String baseUrl, LongRunningAction parent, String clientId)
             throws URISyntaxException {
         super(new Uid());
@@ -88,14 +107,17 @@ public class LongRunningAction extends BasicAction {
 
         this.lraService = lraService;
 
+        // Build LRA ID with optional node ID embedding for HA mode
+        String uidPath = buildUidPath(lraService);
+
         if (parent != null) {
             this.parentId = parent.getId();
             // encode the parent in the child URI (by rights we'd use LRA_HTTP_PARENT_CONTEXT_HEADER)
             // the parent is used by children to contact parents in certain scenarios
             // BTW  this technique is historical and needs to be changed to use the header
-            this.id = Current.buildFullLRAUrl(String.format("%s/%s", baseUrl, get_uid().fileStringForm()), parent.getId());
+            this.id = Current.buildFullLRAUrl(String.format("%s/%s", baseUrl, uidPath), parent.getId());
         } else {
-            this.id = new URI(String.format("%s/%s", baseUrl, get_uid().fileStringForm()));
+            this.id = new URI(String.format("%s/%s", baseUrl, uidPath));
         }
 
         this.clientId = clientId;

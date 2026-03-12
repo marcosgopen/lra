@@ -1,0 +1,26 @@
+## WildFly CLI script to configure Infinispan for LRA HA mode.
+## Run via: jboss-cli.sh --file=configure-lra-caches.cli
+## The embed-server / stop-embedded-server commands are included so this
+## script works in offline mode (no running WildFly instance required).
+## Idempotent: skips configuration if the lra cache container already exists.
+##
+## This creates an Infinispan cache container used by:
+## - InfinispanClusterCoordinator (JGroups-based leader election)
+## - InfinispanSlots (BackingSlots ObjectStore backend, when available)
+##
+## LRA state persistence flows through Narayana's standard ObjectStore path.
+## When using InfinispanSlots as the BackingSlots implementation (PR #2537),
+## the SlotStore manages its own cache within this container.
+
+embed-server --server-config=standalone-ha.xml --std-out=discard
+
+if (outcome != success) of /subsystem=infinispan/cache-container=lra:read-resource
+    batch
+    /subsystem=infinispan/cache-container=lra:add(default-cache=lra-objectstore)
+    /subsystem=infinispan/cache-container=lra/transport=jgroups:add()
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-objectstore:add()
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-objectstore/component=partition-handling:add(when-split=DENY_READ_WRITES)
+    run-batch
+end-if
+
+stop-embedded-server

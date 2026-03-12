@@ -85,7 +85,7 @@ function init_test_options {
     [ $LRA_CURRENT_VERSION ] || LRA_CURRENT_VERSION=`awk '/lra-parent/ { while(!/<version>/) {getline;} print; }' pom.xml | cut -d \< -f 2|cut -d \> -f 2`
     [ $CODE_COVERAGE ] || CODE_COVERAGE=0
     [ x"$CODE_COVERAGE_ARGS" != "x" ] || CODE_COVERAGE_ARGS=""
-    [ $ARQ_PROF ] || ARQ_PROF=arq	# IPv4 arquillian profile
+    [ $ARQ_PROF ] || ARQ_PROF=arq,ha-full-suite	# IPv4 arquillian profile
     [ $USE_WILDFLY_SUBSYSTEM_COORDINATOR] || USE_WILDFLY_SUBSYSTEM_COORDINATOR=" -Pcoordinator.wildfly.subsystem"	# use the built-in WildFly coordinator
     [ $ENABLE_LRA_TRACE_LOGS ] || ENABLE_LRA_TRACE_LOGS=" -Dtest.logs.to.file=true -Dtrace.lra.coordinator"
 

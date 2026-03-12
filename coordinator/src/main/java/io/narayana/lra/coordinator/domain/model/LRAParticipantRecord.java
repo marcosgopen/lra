@@ -1030,6 +1030,10 @@ public class LRAParticipantRecord extends AbstractRecord implements Comparable<A
         }
     }
 
+    void setParticipantPath(String participantPath) {
+        this.participantPath = participantPath;
+    }
+
     void setRecoveryURI(String recoveryURI) {
         try {
             this.recoveryURI = new URI(recoveryURI);

@@ -19,6 +19,7 @@ import io.narayana.lra.LRAConstants;
 import io.narayana.lra.LRAData;
 import io.narayana.lra.coordinator.domain.model.LRAParticipantRecord;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
+import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
 import io.narayana.lra.coordinator.internal.LRARecoveryModule;
 import io.narayana.lra.logging.LRALogger;
 import jakarta.ws.rs.NotFoundException;
@@ -45,6 +46,11 @@ public class LRAService {
     private final Map<URI, ReentrantLock> locks = new ConcurrentHashMap<>();
     private final Map<LongRunningAction, Map<String, String>> lraParticipants = new ConcurrentHashMap<>();
     private LRARecoveryModule recoveryModule;
+
+    // HA components (injected by LRARecoveryModule when HA is enabled)
+    private ClusterCoordinationService clusterCoordinator;
+    private String nodeId;
+    private boolean haEnabled = false;
 
     public LongRunningAction getTransaction(URI lraId) throws NotFoundException {
         // Fast path: check active LRAs first (atomic get)
@@ -564,5 +570,78 @@ public class LRAService {
     private List<LRAData> getDataByStatus(Map<URI, LongRunningAction> lrasToFilter, LRAStatus status) {
         return lrasToFilter.values().stream().filter(t -> t.getLRAStatus() == status)
                 .map(LongRunningAction::getLRAData).collect(toList());
+    }
+
+    // HA-related methods
+
+    /**
+     * Initializes HA components and node ID.
+     * Called by LRARecoveryModule when HA is enabled.
+     *
+     * @param clusterCoordinator the cluster coordinator
+     */
+    public void initializeHA(ClusterCoordinationService clusterCoordinator) {
+        this.clusterCoordinator = clusterCoordinator;
+        this.haEnabled = true;
+
+        // Initialize node ID
+        initializeNodeId();
+
+        LRALogger.logger.infof("LRAService initialized with HA mode, node ID: %s", nodeId);
+    }
+
+    /**
+     * Initializes the node ID for this coordinator instance. Tries in order:
+     * 1. System property: lra.coordinator.node.id
+     * 2. Narayana node identifier
+     */
+    private void initializeNodeId() {
+        // Try system property first
+        nodeId = System.getProperty("lra.coordinator.node.id");
+
+        if (nodeId == null || nodeId.isEmpty()) {
+            // Fallback to Narayana node identifier
+            try {
+                String narayanaNodeId = com.arjuna.ats.arjuna.common.arjPropertyManager
+                        .getCoreEnvironmentBean().getNodeIdentifier();
+                nodeId = "node-" + narayanaNodeId;
+            } catch (Exception e) {
+                // Final fallback
+                nodeId = "node-" + System.currentTimeMillis();
+                LRALogger.logger.warnf("Failed to get Narayana node identifier, using timestamp: %s", nodeId);
+            }
+        }
+
+        LRALogger.logger.infof("Initialized coordinator node ID: %s", nodeId);
+    }
+
+    /**
+     * Gets the node ID for this coordinator instance.
+     *
+     * @return the node ID
+     */
+    public String getNodeId() {
+        if (nodeId == null) {
+            initializeNodeId();
+        }
+        return nodeId;
+    }
+
+    /**
+     * Checks if HA mode is enabled.
+     *
+     * @return true if HA is enabled
+     */
+    public boolean isHaEnabled() {
+        return haEnabled;
+    }
+
+    /**
+     * Gets the cluster coordinator (may be null if HA is disabled).
+     *
+     * @return the cluster coordinator or null
+     */
+    public ClusterCoordinationService getClusterCoordinator() {
+        return clusterCoordinator;
     }
 }

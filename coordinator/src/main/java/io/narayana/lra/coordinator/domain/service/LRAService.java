@@ -287,6 +287,41 @@ public class LRAService {
         return null;
     }
 
+    /**
+     * Extracts the LRA UID from an LRA ID URI.
+     * Handles both full URIs (http://host/lra-coordinator/uid) and
+     * UID-only values (uid) as used by recovery URL path parameters.
+     */
+    private String extractLraUid(URI lraId) {
+        if (lraId == null) {
+            return null;
+        }
+        String uid = LRAConstants.getLRAUid(lraId);
+        return (uid != null && !uid.isEmpty()) ? uid : null;
+    }
+
+    /**
+     * Extracts the LRA UID segment from a recovery URL.
+     * Recovery URL format: {base}/lra-coordinator/recovery/{lraUid}/{participantUid}
+     * The LRA UID is the second-to-last path segment.
+     */
+    private String extractLraUidFromRecoveryUrl(String recoveryUrl) {
+        try {
+            URI uri = new URI(recoveryUrl);
+            String path = uri.getPath();
+            if (path == null) {
+                return null;
+            }
+            String[] segments = path.split("/");
+            if (segments.length < 2) {
+                return null;
+            }
+            return segments[segments.length - 2];
+        } catch (URISyntaxException e) {
+            return null;
+        }
+    }
+
     public synchronized LongRunningAction startLRA(String baseUri, URI parentLRA, String clientId, Long timelimit) {
         LongRunningAction lra;
         int status;

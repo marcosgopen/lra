@@ -1717,9 +1717,8 @@ public class LRATest extends LRATestBase {
             // Complete the nested LRA directly
             ParticipantStatus status = lraClient.completeNestedLRA(childId);
 
-            // The status should indicate completion or completing
-            assertTrue(status == ParticipantStatus.Completed || status == ParticipantStatus.Completing,
-                    "Nested LRA should be Completed or Completing after completion, but was: " + status);
+            assertEquals(ParticipantStatus.Completed, status,
+                    "Nested LRA should be Completed after completion");
         } finally {
             // Clean up - close parent
             try {
@@ -1745,9 +1744,8 @@ public class LRATest extends LRATestBase {
             // Compensate the nested LRA directly
             ParticipantStatus status = lraClient.compensateNestedLRA(childId);
 
-            // The status should indicate compensation or compensating
-            assertTrue(status == ParticipantStatus.Compensated || status == ParticipantStatus.Compensating,
-                    "Nested LRA should be Compensated or Compensating after compensation, but was: " + status);
+            assertEquals(ParticipantStatus.Compensated, status,
+                    "Nested LRA should be Compensated after compensation");
         } finally {
             // Clean up - cancel parent
             try {
@@ -1773,8 +1771,8 @@ public class LRATest extends LRATestBase {
             // Complete the nested LRA
             ParticipantStatus status = lraClient.completeNestedLRA(childId);
 
-            assertTrue(status == ParticipantStatus.Completed || status == ParticipantStatus.Completing,
-                    "Nested LRA should be completed before forgetting");
+            assertEquals(ParticipantStatus.Completed, status,
+                    "Nested LRA should be Completed before forgetting");
 
             // Now forget the nested LRA - this should succeed without throwing an exception
             lraClient.forgetNestedLRA(childId);
@@ -1848,9 +1846,8 @@ public class LRATest extends LRATestBase {
             // Compensate the child directly
             ParticipantStatus compensatedStatus = lraClient
                     .compensateNestedLRA(childId);
-            assertTrue(compensatedStatus == ParticipantStatus.Compensated
-                    || compensatedStatus == ParticipantStatus.Compensating,
-                    "Child should be compensated");
+            assertEquals(ParticipantStatus.Compensated, compensatedStatus,
+                    "Child should be Compensated");
 
             // Cancel the parent
             lraClient.cancelLRA(parentId);

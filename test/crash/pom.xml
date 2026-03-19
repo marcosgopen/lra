@@ -31,7 +31,11 @@
       <artifactId>junit-jupiter</artifactId>
       <scope>test</scope>
     </dependency>
-
+    <dependency>
+      <groupId>org.jboss.byteman</groupId>
+      <artifactId>byteman</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
@@ -42,6 +46,24 @@
         <configuration>
           <skip>true</skip>
         </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>copy-byteman</id>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
+            <phase>test-compile</phase>
+            <configuration>
+              <stripVersion>true</stripVersion>
+              <includeGroupIds>org.jboss.byteman</includeGroupIds>
+              <outputDirectory>${project.build.directory}/lib</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>

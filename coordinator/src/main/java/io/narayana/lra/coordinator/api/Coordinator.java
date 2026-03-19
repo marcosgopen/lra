@@ -424,7 +424,7 @@ public class Coordinator extends Application {
             @HeaderParam(HttpHeaders.ACCEPT) @DefaultValue(MediaType.TEXT_PLAIN) String mediaType,
             @HeaderParam(LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) @DefaultValue(CURRENT_API_VERSION_STRING) String version) {
 
-        LRAData lraData = lraService.endLRA(toURI(nestedLraId), false, true, null, null);
+        LRAData lraData = lraService.endLRA(toURI(nestedLraId), false, false, null, null);
 
         return buildResponse(mapToParticipantStatus(lraData.getStatus()).name(), version, mediaType);
     }

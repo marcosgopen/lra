@@ -16,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import io.narayana.lra.LRAConstants;
+import io.narayana.lra.arquillian.internal.BytemanSignal;
 import io.narayana.lra.arquillian.resource.LRAMultipleParticipant1Initiator;
 import io.narayana.lra.arquillian.resource.LRAMultipleParticipant2;
 import jakarta.json.Json;
@@ -49,6 +50,8 @@ import org.junit.jupiter.api.TestInfo;
  */
 public class FailedLRAMultiplePartipantsIT extends TestBase {
     private static final Logger log = Logger.getLogger(FailedLRAMultiplePartipantsIT.class);
+
+    private final BytemanSignal bytemanSignal = new BytemanSignal();
 
     @ArquillianResource
     public URL baseURL;
@@ -102,34 +105,34 @@ public class FailedLRAMultiplePartipantsIT extends TestBase {
         }
     }
 
+    /**
+     * Wait for the AfterLRA callback to be delivered to the participant.
+     * A byteman rule in the coordinator JVM signals when afterLRARequest
+     * succeeds; this method waits for that signal before checking the
+     * participant's endpoint, avoiding fragile Thread.sleep loops.
+     */
     private String getLraEndStatus(String resourcePrefix, String resourcePath, URI lraId) {
-        for (int i = 0; i < 10; i++) {
-            try (Response response = client.target(baseURL.toURI())
-                    .path(resourcePrefix)
-                    .path(resourcePath)
-                    .queryParam(LRA_HTTP_CONTEXT_HEADER, lraId)
-                    .request()
-                    .get()) {
+        // Wait for the byteman signal that the AfterLRA callback was delivered
+        bytemanSignal.waitFor(lraId, "AfterLRA", 60);
 
-                Assertions.assertTrue(response.hasEntity(),
-                        "Expecting a non empty body in response from " + resourcePrefix + "/" + resourcePath);
+        try (Response response = client.target(baseURL.toURI())
+                .path(resourcePrefix)
+                .path(resourcePath)
+                .queryParam(LRA_HTTP_CONTEXT_HEADER, lraId)
+                .request()
+                .get()) {
 
-                if (response.getStatus() != 202) {
-                    return response.readEntity(String.class);
-                }
+            Assertions.assertTrue(response.hasEntity(),
+                    "Expecting a non empty body in response from " + resourcePrefix + "/" + resourcePath);
 
-                log.infov("AfterLRA not yet called. Waiting {0}/10", i);
-                Thread.sleep(1000);
+            Assertions.assertNotEquals(202, response.getStatus(),
+                    "AfterLRA should have been called after byteman signal but participant still reports 202");
 
-            } catch (URISyntaxException e) {
-                throw new IllegalStateException("response cannot be converted to URI: " + e.getMessage());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return null;
-            }
+            return response.readEntity(String.class);
+
+        } catch (URISyntaxException e) {
+            throw new IllegalStateException("response cannot be converted to URI: " + e.getMessage());
         }
-
-        return null;
     }
 
     private URI invokeInTransaction(String resourcePrefix, String resourcePath, int expectedStatus) {

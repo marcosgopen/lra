@@ -12,7 +12,7 @@
         <container qualifier="${arquillian.lra.coordinator.container.qualifier}" mode="manual">
             <configuration>
                 <property name="jbossHome">${wildfly.home}</property>
-                <property name="javaVmArguments">${server.jvm.args} ${lra.coordinator.debug.params} -DObjectStoreEnvironmentBean.objectStoreDir=${project.build.directory}/wfly_lra_objectstore -DObjectStoreEnvironmentBean.communicationStore.objectStoreDir=${project.build.directory}/wfly_lra_objectstore</property>
+                <property name="javaVmArguments">${server.jvm.args} ${lra.coordinator.debug.params} -DObjectStoreEnvironmentBean.objectStoreDir=${project.build.directory}/wfly_lra_objectstore -DObjectStoreEnvironmentBean.communicationStore.objectStoreDir=${project.build.directory}/wfly_lra_objectstore -Djboss.modules.system.pkgs=org.jboss.byteman -Dorg.jboss.byteman.transform.all -Dbyteman.signal.dir=${project.build.directory}/byteman-signals -javaagent:${project.build.directory}/lib/byteman.jar=script:${project.build.directory}/test-classes/scripts/lra-status-signal.btm</property>
                 <property name="managementAddress">${test.application.host}</property> <!-- default management port is 9990 -->
                 <property name="startupTimeoutInSeconds">${server.startup.timeout:60}</property>
                 <property name="serverConfig">${lra.coordinator.xml.filename}</property>

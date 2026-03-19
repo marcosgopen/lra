@@ -24,6 +24,8 @@
   </modules>
 
   <properties>
+    <!-- Byteman args for the coordinator JVM; empty by default, set in modules that need it -->
+    <jvm.args.byteman.coordinator></jvm.args.byteman.coordinator>
     <lra.coordinator.debug.params></lra.coordinator.debug.params>
     <!-- defined within -Ddebug.coordinator/-Pdebug.lra.coordinator -->
     <lra.coordinator.debug.port>8788</lra.coordinator.debug.port>
@@ -108,6 +110,7 @@
 
             <!-- used in arquillian*.xml descriptor to place test run related data -->
             <project.build.directory>${project.build.directory}</project.build.directory>
+            <byteman.signal.dir>${project.build.directory}/byteman-signals</byteman.signal.dir>
           </systemPropertyVariables>
         </configuration>
       </plugin>
@@ -294,7 +297,7 @@
                   <!-- used by start -->
                   <jbossHome>${wildfly.home}</jbossHome>
                   <serverConfig>${lra.coordinator.xml.filename}</serverConfig>
-                  <javaOpts>${server.jvm.args} ${server.jvm.object.store.arg} ${lra.coordinator.debug.params}</javaOpts>
+                  <javaOpts>${server.jvm.args} ${jvm.args.byteman.coordinator} ${server.jvm.object.store.arg} ${lra.coordinator.debug.params}</javaOpts>
                 </configuration>
               </execution>
 

@@ -12,6 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import io.narayana.lra.LRAData;
+import io.narayana.lra.arquillian.internal.BytemanSignal;
 import io.narayana.lra.arquillian.resource.LRAListener;
 import io.narayana.lra.client.NarayanaLRAClient;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
@@ -148,6 +149,8 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
         String lraId;
         URI lraListenerURI = UriBuilder.fromUri(baseURL.toURI()).path(LRAListener.LRA_LISTENER_PATH).build();
 
+        bytemanSignal.clear();
+
         // Starts an LRA with a short time limit by invoking a resource annotated with @LRA. The time limit is
         // defined as LRAListener.LRA_SHORT_TIMELIMIT
         Response response = client
@@ -168,20 +171,18 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
         doWait((LRAListener.LRA_SHORT_TIMELIMIT) * 1000);
         startContainer(LRA_COORDINATOR_CONTAINER_QUALIFIER, "");
 
-        // we might need to wait a little longer so that the LRA status moves from
-        // Cancelling to Cancelled
-        LRAStatus status = getStatus(new URI(lraId));
-        LRALogger.logger.infof("%s: Status after restart is %s%n", status == null ? "GONE" : status.name());
-        for (int i = 0; i < 100 && status != null && status != LRAStatus.Cancelled; i++) {
-            LRALogger.logger.warnf("%s: Status after restart is %s%n", status == null ? "GONE" : status.name());
-            doWait(500);
-            status = getStatus(new URI(lraId));
-        }
+        // Use byteman rendezvous: a byteman rule in the coordinator JVM writes to a
+        // signal file when updateState(Cancelled) fires. Poll that file instead of
+        // blindly sleeping between REST status checks.
+        URI lraURI = new URI(lraId);
+        boolean signalled = bytemanSignal.waitFor(lraURI, LRAStatus.Cancelled.name(), 60);
+
+        LRAStatus status = getStatus(lraURI);
 
         // null status is also accepted because the lra has already been cancelled and
         // removed
-        Assertions.assertTrue(status == null || status == LRAStatus.Cancelled,
-                String.format("LRA %s should have cancelled but was %s", lraId, status));
+        Assertions.assertTrue(signalled || status == null || status == LRAStatus.Cancelled,
+                String.format("LRA %s should have cancelled but was %s (byteman signalled=%s)", lraId, status, signalled));
 
         // Verifies that the resource was notified that the LRA finished
         String listenerStatus = getStatusFromListener(lraListenerURI);
@@ -199,21 +200,28 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
 
         URI lraListenerURI = UriBuilder.fromUri(deploymentUrl.toURI()).path(LRAListener.LRA_LISTENER_PATH).build();
 
+        bytemanSignal.clear();
+
         // Starts an LRA with a long timeout to validate that long LRAs do not finish early during recovery
         URI longLRA = lraClient.startLRA(null, "Long Timeout Recovery Test", LONG_TIMEOUT, ChronoUnit.MILLIS);
         // Starts an LRA with a short timeout to validate that short LRAs (which timed out when the coordinator was unavailable) are cancelled
         URI shortLRA = lraClient.startLRA(null, "Short Timeout Recovery Test", SHORT_TIMEOUT, ChronoUnit.MILLIS);
 
+        // Stop the coordinator and wait for the short LRA timeout to expire
         stopContainer(LRA_COORDINATOR_CONTAINER_QUALIFIER, "");
         doWait(SHORT_TIMEOUT);
         startContainer(LRA_COORDINATOR_CONTAINER_QUALIFIER, "");
+
+        // Wait for the byteman rule to signal that the short LRA was cancelled by
+        // recovery, instead of immediately checking status (which may still be Cancelling)
+        bytemanSignal.waitFor(shortLRA, LRAStatus.Cancelled.name(), 60);
 
         LRAStatus longStatus = getStatus(longLRA);
         LRAStatus shortStatus = getStatus(shortLRA);
 
         Assertions.assertEquals(LRAStatus.Active.name(), longStatus.name(), "LRA with long timeout should still be active");
         Assertions.assertTrue(shortStatus == null ||
-                LRAStatus.Cancelled.equals(shortStatus) || LRAStatus.Cancelling.equals(shortStatus),
+                LRAStatus.Cancelled.equals(shortStatus),
                 "LRA with short timeout should not be active");
 
         // Using lra-participant, a new LRA transaction is started as sub-transaction of the long LRA transaction
@@ -235,6 +243,8 @@ public class LRACoordinatorRecoveryIT extends UnmanagedTestBase {
         assertEquals(LRAStatus.Closed.name(), listenerStatus,
                 "LRA listener should have been told that the final state of the LRA was closed");
     }
+
+    private final BytemanSignal bytemanSignal = new BytemanSignal();
 
     // Private methods
 

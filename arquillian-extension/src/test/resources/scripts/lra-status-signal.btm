@@ -1,0 +1,22 @@
+#######################################################################
+# Byteman example rule that writes a marker file when an LRA reaches a
+# terminal status. The test polls for this file instead of using
+# Thread.sleep to wait for recovery completion.
+#
+# The marker file path would be:
+#   ${byteman.signal.dir}/lra-signals.log
+#
+# Each line written is: <lraId>=<status>
+#
+RULE signal LRA terminal status
+CLASS io.narayana.lra.coordinator.domain.model.LongRunningAction
+METHOD updateState(org.eclipse.microprofile.lra.annotation.LRAStatus, boolean)
+AT EXIT
+IF $!
+   && ($1 == org.eclipse.microprofile.lra.annotation.LRAStatus.Cancelled
+       || $1 == org.eclipse.microprofile.lra.annotation.LRAStatus.Closed
+       || $1 == org.eclipse.microprofile.lra.annotation.LRAStatus.FailedToCancel
+       || $1 == org.eclipse.microprofile.lra.annotation.LRAStatus.FailedToClose)
+DO traceOpen("lra-signal", System.getProperty("byteman.signal.dir", "/tmp") + java.io.File.separator + "lra-signals.log");
+   traceln("lra-signal", $0.getId().toASCIIString() + "=" + $1.name())
+ENDRULE

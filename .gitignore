@@ -25,4 +25,4 @@ audit.log
 *.db
 *.json
 .cache
-
+*.log

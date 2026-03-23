@@ -431,9 +431,9 @@ public class LRAParticipantRecord extends AbstractRecord implements Comparable<A
 
         switch (status) {
             case Completed:
-                /* FALLTHRU */
-            case FailedToComplete:
                 return parentId == null; // completed nested LRAs must remain cancellable
+            case FailedToComplete:
+                return true; // terminal failure - cannot be compensated
             case Compensated:
                 /* FALLTHRU */
             case FailedToCompensate:
@@ -486,8 +486,7 @@ public class LRAParticipantRecord extends AbstractRecord implements Comparable<A
     }
 
     private int atEnd(int res) {
-        if (parentId != null
-                && (status == ParticipantStatus.Completed || status == ParticipantStatus.FailedToComplete)) {
+        if (parentId != null && status == ParticipantStatus.Completed) {
             if (lraService.getLRA(parentId).getStatus() == LRAStatus.Active) {
                 // completed nested participants must remain compensatable
                 return TwoPhaseOutcome.HEURISTIC_HAZARD; // ask to be called again

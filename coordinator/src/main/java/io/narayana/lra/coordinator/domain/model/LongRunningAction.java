@@ -521,6 +521,9 @@ public class LongRunningAction extends BasicAction {
 
         if (status == LRAStatus.Active) {
             updateState(cancel ? LRAStatus.Cancelling : LRAStatus.Closing); // can throw ServiceUnavailableException
+        } else if (cancel && nested && status == LRAStatus.Closed) {
+            // a completed nested LRA can be compensated if the parent cancels (spec: Completed -> Compensating)
+            updateState(LRAStatus.Cancelling);
         } else if (isFinished()) {
             if (LRALogger.logger.isTraceEnabled()) {
                 trace_progress("finished");

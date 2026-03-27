@@ -14,5 +14,5 @@ For more documentation on Narayana LRA:
 * link:https://www.narayana.io//docs/project/index.html#d5e7502[Narayana LRA doc]
 
 Documentation on MicroProfile LRA specification:
-
+  
 * link:https://github.com/eclipse/microprofile-lra/blob/master/spec/src/main/asciidoc/microprofile-lra-spec.asciidoc[microprofile-lra-spec]

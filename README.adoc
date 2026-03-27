@@ -16,5 +16,5 @@ For more documentation on Narayana LRA:
 Documentation on MicroProfile LRA specification:
 
 
-  
+  dffd
 * link:https://github.com/eclipse/microprofile-lra/blob/master/spec/src/main/asciidoc/microprofile-lra-spec.asciidoc[microprofile-lra-spec]

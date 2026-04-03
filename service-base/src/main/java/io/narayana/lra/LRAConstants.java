@@ -131,7 +131,12 @@ public final class LRAConstants {
         if (lraId == null)
             return null;
         String lraIdPath = lraId.getPath();
-        String lraCoordinatorPath = lraIdPath.substring(0, lraIdPath.lastIndexOf(COORDINATOR_PATH_NAME))
+        int coordinatorIndex = lraIdPath.lastIndexOf(COORDINATOR_PATH_NAME);
+        if (coordinatorIndex < 0) {
+            String errMsg = LRALogger.i18nLogger.warn_invalid_uri(lraId.toASCIIString(), "getLRACoordinatorUrl");
+            throw new IllegalStateException(errMsg);
+        }
+        String lraCoordinatorPath = lraIdPath.substring(0, coordinatorIndex)
                 + COORDINATOR_PATH_NAME;
         try {
             return new URI(lraId.getScheme(), lraId.getUserInfo(), lraId.getHost(), lraId.getPort(), lraCoordinatorPath,

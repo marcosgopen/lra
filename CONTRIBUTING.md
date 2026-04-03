@@ -53,7 +53,7 @@ Red Hat is committed to eradicating problematic language in all of our interacti
 
 ### Building main
 
-See the [README](README.md) file in the root directory of the repository.
+See the [README](README.adoc) file in the root directory of the repository.
 
 ## Before you contribute
 

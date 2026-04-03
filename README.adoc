@@ -1,18 +1,180 @@
-= MicroProfile LRA
+= Narayana LRA
+:toc: macro
+:toclevels: 2
 
-link:https://github.com/eclipse/microprofile-lra[MicroProfile LRA] is a specification of an annotation based API that enables loosely coupled services to coordinate long running activities in such a way as to guarantee a globally consistent outcome without the need to take long duration locks on data.
+An implementation of the link:https://github.com/eclipse/microprofile-lra[MicroProfile LRA] specification.
+MicroProfile LRA provides an annotation-based API that enables loosely coupled services to coordinate long running activities in such a way as to guarantee a globally consistent outcome without the need to take long duration locks on data.
+
+toc::[]
+
+== Prerequisites
+
+* JDK 17 or later
+* Maven 3.x (or use the included Maven Wrapper `./mvnw`)
+
+== Building the Project
+
+Use the Maven Wrapper to build:
+
+[source,sh]
+----
+./mvnw clean install
+----
+
+Alternatively, use the `build.sh` script which configures sensible defaults:
+
+[source,sh]
+----
+./build.sh clean install
+----
+
+To skip tests during the build:
+
+[source,sh]
+----
+./mvnw clean install -DskipTests
+----
+
+To apply code formatting (enabled by default via the `format` profile):
+
+[source,sh]
+----
+./mvnw clean package -DskipTests
+----
+
+== Project Modules
+
+[cols="1,3"]
+|===
+| Module | Description
+
+| `service-base`
+| Shared functionality common to both the coordinator and clients
+
+| `client`
+| LRA client library for communicating with the coordinator
+
+| `coordinator`
+| Core LRA coordinator implementation — manages long running action lifecycle, state, and recovery
+
+| `coordinator-war`
+| WAR packaging of the coordinator for deployment on application servers
+
+| `jaxrs`
+| JAX-RS integration including filters, context providers, and request/response handling
+
+| `proxy`
+| Proxy API module for LRA proxy functionality
+
+| `arquillian-extension`
+| Arquillian test framework extension for deploying and testing LRA in managed containers
+
+| `test`
+| Integration tests — see link:test/README.adoc[test/README.adoc] for details
+|===
+
+== Running Integration Tests
+
+Integration tests use the link:https://maven.apache.org/surefire/maven-failsafe-plugin/[Maven Failsafe Plugin] and link:https://arquillian.org[Arquillian] to spin up separate JVMs for the coordinator, participant, and test client.
+
+To run all integration tests with a provisioned WildFly instance:
+
+[source,sh]
+----
+mvn clean verify -Parq,provision
+----
+
+To run a single test:
+
+[source,sh]
+----
+mvn clean verify -Parq,provision -pl :lra-test-basic -Dit.test=FailedLRAIT
+----
+
+To run against an existing WildFly installation:
+
+[source,sh]
+----
+export JBOSS_HOME=/path/to/wildfly
+mvn clean verify -Parq
+----
+
+For more details on test configuration, profiles, and debugging options, see link:test/README.adoc[test/README.adoc].
 
 == MicroProfile Fault Tolerance
-LRA Coordinator implements Bulkhead Fault Tolerance strategies for dealing with failure:
 
-* Bulkhead: Limit concurrent execution so that failures in that area can't overload the whole system
+The LRA coordinator implements MicroProfile Fault Tolerance strategies:
 
-You can link:https://www.eclipse.org/community/eclipse_newsletter/2017/september/article4.php[configure the Fault Tolerance] variables (Bulkhead value and waitingTaskQueue) by defining the config property as "classname/annotation/parameter" in the link:./coordinator/src/main/resources/META-INF/microprofile-config.properties[microprofile-config.properties] file. 
+* **Bulkhead**: Limits concurrent execution so that failures in one area cannot overload the whole system.
 
-For more documentation on Narayana LRA:
+Fault tolerance variables (Bulkhead `value` and `waitingTaskQueue`) can be configured using the `classname/annotation/parameter` format in the link:coordinator/src/main/resources/META-INF/microprofile-config.properties[microprofile-config.properties] file.
+See the link:https://www.eclipse.org/community/eclipse_newsletter/2017/september/article4.php[Eclipse Fault Tolerance documentation] for details.
 
-* link:https://www.narayana.io//docs/project/index.html#d5e7502[Narayana LRA doc]
+== REST API
 
-Documentation on MicroProfile LRA specification:
+The coordinator exposes a REST API. For details on API versioning, version negotiation via the `Narayana-LRA-API-version` header, and how to generate the OpenAPI schema, see link:API.adoc[API.adoc].
 
-* link:https://github.com/eclipse/microprofile-lra/blob/master/spec/src/main/asciidoc/microprofile-lra-spec.asciidoc[microprofile-lra-spec]
+To generate the OpenAPI schema:
+
+[source,sh]
+----
+cd coordinator
+mvn process-classes -Popenapi-schema
+----
+
+== Maven Profiles
+
+[cols="1,3"]
+|===
+| Profile | Description
+
+| `arq`
+| Runs integration tests using Arquillian with WildFly
+
+| `provision`
+| Provisions a WildFly Galleon instance for testing
+
+| `download`
+| Downloads a WildFly zip distribution for testing
+
+| `coordinator.wildfly.subsystem`
+| Tests against the WildFly built-in LRA coordinator subsystem
+
+| `release`
+| Enables documentation, source, and javadoc packaging
+
+| `codeCoverage`
+| Enables JaCoCo code coverage reporting
+
+| `debug`
+| Enables JVM debugging on port 8787
+
+| `findbugs`
+| Runs SpotBugs static analysis
+
+| `openapi-schema`
+| Generates the OpenAPI schema for the coordinator REST API
+|===
+
+== Documentation
+
+Additional documentation is available in the link:docs/[docs/] directory. To generate the HTML documentation:
+
+[source,sh]
+----
+cd docs
+mvn clean generate-resources
+# Output: docs/target/html/
+----
+
+== Further Reading
+
+* link:https://github.com/eclipse/microprofile-lra/blob/master/spec/src/main/asciidoc/microprofile-lra-spec.asciidoc[MicroProfile LRA Specification]
+* link:https://www.narayana.io//docs/project/index.html#d5e7502[Narayana LRA Documentation]
+* link:API.adoc[REST API Versioning]
+* link:CONTRIBUTING.md[Contributing Guide]
+* link:CODE_OF_CONDUCT.md[Code of Conduct]
+
+== License
+
+This project is licensed under the link:LICENSE[Apache License 2.0].

@@ -11,9 +11,11 @@ import static org.eclipse.microprofile.lra.annotation.ws.rs.LRA.LRA_HTTP_RECOVER
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import io.narayana.lra.LRAConstants;
 import io.narayana.lra.client.NarayanaLRAClient;
 import io.narayana.lra.coordinator.api.Coordinator;
 import io.narayana.lra.coordinator.internal.LRARecoveryModule;
@@ -350,6 +352,30 @@ public class LRAFaultToleranceTest extends LRATestBase {
                 .put(Entity.text(""));
     }
 
+    private Response rawCloseLRAWithVersion(URI lraId, String apiVersion) {
+        String lraUrl = lraId.toASCIIString().split("\\?")[0];
+        return client.target(String.format("%s/close", lraUrl))
+                .request()
+                .header(LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME, apiVersion)
+                .put(Entity.text(""));
+    }
+
+    private Response rawCancelLRAWithVersion(URI lraId, String apiVersion) {
+        String lraUrl = lraId.toASCIIString().split("\\?")[0];
+        return client.target(String.format("%s/cancel", lraUrl))
+                .request()
+                .header(LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME, apiVersion)
+                .put(Entity.text(""));
+    }
+
+    private Response rawGetStatusWithVersion(URI lraId, String apiVersion) {
+        String lraUrl = lraId.toASCIIString().split("\\?")[0];
+        return client.target(String.format("%s/status", lraUrl))
+                .request()
+                .header(LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME, apiVersion)
+                .get();
+    }
+
     private static String makeLink(String uriPrefix, String key) {
         return Link.fromUri(String.format("%s/%s", uriPrefix, key))
                 .title(key + " URI")
@@ -365,8 +391,9 @@ public class LRAFaultToleranceTest extends LRATestBase {
     /**
      * When the coordinator cannot acquire the lock during close (because another
      * thread is already finishing the LRA), finishLRA should return without
-     * modifying the LRA. The LRA must remain Active and a subsequent close
-     * (after the lock becomes available) must succeed.
+     * modifying the LRA. The coordinator should return 503 (Service Unavailable)
+     * for v2.0 clients to signal "retry later", and the LRA must remain Active.
+     * A subsequent close (after the lock becomes available) must succeed.
      */
     @Test
     @BMRules(rules = {
@@ -379,9 +406,9 @@ public class LRAFaultToleranceTest extends LRATestBase {
 
         BytemanHelper.setFlag("fail-lock");
         try {
-            try (Response response = rawCloseLRA(lraId)) {
-                assertEquals(202, response.getStatus(),
-                        "Close with failed lock should return 202 (LRA still Active)");
+            try (Response response = rawCloseLRAWithVersion(lraId, LRAConstants.API_VERSION_2_0)) {
+                assertEquals(503, response.getStatus(),
+                        "Close with failed lock should return 503 (retry later)");
             }
             LRAStatus status = getStatus(lraId);
             assertEquals(LRAStatus.Active, status,
@@ -413,9 +440,9 @@ public class LRAFaultToleranceTest extends LRATestBase {
 
         BytemanHelper.setFlag("fail-lock");
         try {
-            try (Response response = rawCancelLRA(lraId)) {
-                assertEquals(202, response.getStatus(),
-                        "Cancel with failed lock should return 202 (LRA still Active)");
+            try (Response response = rawCancelLRAWithVersion(lraId, LRAConstants.API_VERSION_2_0)) {
+                assertEquals(503, response.getStatus(),
+                        "Cancel with failed lock should return 503 (retry later)");
             }
             LRAStatus status = getStatus(lraId);
             assertEquals(LRAStatus.Active, status,
@@ -446,7 +473,7 @@ public class LRAFaultToleranceTest extends LRATestBase {
         URI lraId = lraClient.startLRA(testName);
         enlistUnreachableParticipant(lraId);
 
-        try (Response response = rawCloseLRA(lraId)) {
+        try (Response response = rawCloseLRAWithVersion(lraId, LRAConstants.API_VERSION_2_0)) {
             assertEquals(202, response.getStatus(),
                     "Close should return 202 when participant is unreachable");
         }
@@ -467,7 +494,7 @@ public class LRAFaultToleranceTest extends LRATestBase {
         URI lraId = lraClient.startLRA(testName);
         enlistUnreachableParticipant(lraId);
 
-        try (Response response = rawCancelLRA(lraId)) {
+        try (Response response = rawCancelLRAWithVersion(lraId, LRAConstants.API_VERSION_2_0)) {
             assertEquals(202, response.getStatus(),
                     "Cancel should return 202 when participant is unreachable");
         }
@@ -476,6 +503,89 @@ public class LRAFaultToleranceTest extends LRATestBase {
         assertNotNull(status, "LRA should still exist when participant is unreachable");
         assertTrue(status == LRAStatus.Cancelling || status == LRAStatus.FailedToCancel,
                 "LRA should be Cancelling or FailedToCancel when participant is unreachable, but was " + status);
+    }
+
+    // ===================================================================
+    // 2b. Location Header on 202 Responses
+    // ===================================================================
+
+    /**
+     * When close returns 202, the response must include a Location header
+     * pointing to the status endpoint. The URL in the Location header must
+     * be functional: a GET on it must return the current LRA status.
+     */
+    @Test
+    public void testLocationHeaderOnCloseAccepted() {
+        URI lraId = lraClient.startLRA(testName);
+        enlistUnreachableParticipant(lraId);
+
+        try (Response closeResponse = rawCloseLRAWithVersion(lraId, LRAConstants.API_VERSION_2_0)) {
+            assertEquals(202, closeResponse.getStatus(),
+                    "Close should return 202 when participant is unreachable");
+
+            URI location = closeResponse.getLocation();
+            assertNotNull(location, "202 response must include a Location header");
+            assertTrue(location.toASCIIString().contains("/status"),
+                    "Location header should point to the status endpoint, but was: " + location);
+
+            // the Location URL must be functional - GET on it returns 200 with the current status
+            try (Response statusResponse = client.target(location).request().get()) {
+                assertEquals(200, statusResponse.getStatus(),
+                        "GET on Location URL should return 200");
+                String statusBody = statusResponse.readEntity(String.class);
+                assertNotNull(statusBody, "Status response body should not be null");
+                LRAStatus polledStatus = LRAStatus.valueOf(statusBody);
+                assertTrue(polledStatus == LRAStatus.Closing || polledStatus == LRAStatus.FailedToClose,
+                        "Polled status should be Closing or FailedToClose, but was " + polledStatus);
+            }
+        }
+    }
+
+    /**
+     * Same as {@link #testLocationHeaderOnCloseAccepted()} but for cancel.
+     */
+    @Test
+    public void testLocationHeaderOnCancelAccepted() {
+        URI lraId = lraClient.startLRA(testName);
+        enlistUnreachableParticipant(lraId);
+
+        try (Response cancelResponse = rawCancelLRAWithVersion(lraId, LRAConstants.API_VERSION_2_0)) {
+            assertEquals(202, cancelResponse.getStatus(),
+                    "Cancel should return 202 when participant is unreachable");
+
+            URI location = cancelResponse.getLocation();
+            assertNotNull(location, "202 response must include a Location header");
+            assertTrue(location.toASCIIString().contains("/status"),
+                    "Location header should point to the status endpoint, but was: " + location);
+
+            // the Location URL must be functional
+            try (Response statusResponse = client.target(location).request().get()) {
+                assertEquals(200, statusResponse.getStatus(),
+                        "GET on Location URL should return 200");
+                String statusBody = statusResponse.readEntity(String.class);
+                assertNotNull(statusBody, "Status response body should not be null");
+                LRAStatus polledStatus = LRAStatus.valueOf(statusBody);
+                assertTrue(polledStatus == LRAStatus.Cancelling || polledStatus == LRAStatus.FailedToCancel,
+                        "Polled status should be Cancelling or FailedToCancel, but was " + polledStatus);
+            }
+        }
+    }
+
+    /**
+     * When close returns 200 (terminal state), the Location header should not be
+     * present since there is nothing to poll.
+     */
+    @Test
+    public void testNoLocationHeaderOnCloseSuccess() {
+        URI lraId = lraClient.startLRA(testName);
+        enlistParticipant(lraId);
+
+        try (Response closeResponse = rawCloseLRA(lraId)) {
+            assertEquals(200, closeResponse.getStatus(),
+                    "Close should return 200 when all participants respond");
+            assertNull(closeResponse.getLocation(),
+                    "200 response should not include a Location header");
+        }
     }
 
     // ===================================================================
@@ -616,8 +726,8 @@ public class LRAFaultToleranceTest extends LRATestBase {
         enlistParticipantAtPath(lraId, "/base/garbage-test");
 
         try (Response response = rawCloseLRA(lraId)) {
-            assertTrue(response.getStatus() == 200 || response.getStatus() == 202,
-                    "Close with garbage response should return 200 or 202, got " + response.getStatus());
+            assertEquals(200, response.getStatus(),
+                    "Close with garbage response should return 200");
         }
 
         // the coordinator should not have crashed
@@ -636,8 +746,8 @@ public class LRAFaultToleranceTest extends LRATestBase {
         enlistParticipantAtPath(lraId, "/base/garbage-test");
 
         try (Response response = rawCancelLRA(lraId)) {
-            assertTrue(response.getStatus() == 200 || response.getStatus() == 202,
-                    "Cancel with garbage response should return 200 or 202, got " + response.getStatus());
+            assertEquals(200, response.getStatus(),
+                    "Cancel with garbage response should return 200");
         }
 
         LRAStatus status = getStatus(lraId);
@@ -657,8 +767,8 @@ public class LRAFaultToleranceTest extends LRATestBase {
         enlistParticipantAtPath(lraId, "/base/wrong-code-test");
 
         try (Response response = rawCloseLRA(lraId)) {
-            assertTrue(response.getStatus() == 200 || response.getStatus() == 202,
-                    "Close with wrong status code should return 200 or 202, got " + response.getStatus());
+            assertEquals(200, response.getStatus(),
+                    "Close with wrong status code should return 200");
         }
 
         LRAStatus status = getStatus(lraId);
@@ -676,8 +786,8 @@ public class LRAFaultToleranceTest extends LRATestBase {
         enlistParticipantAtPath(lraId, "/base/wrong-code-test");
 
         try (Response response = rawCancelLRA(lraId)) {
-            assertTrue(response.getStatus() == 200 || response.getStatus() == 202,
-                    "Cancel with wrong status code should return 200 or 202, got " + response.getStatus());
+            assertEquals(200, response.getStatus(),
+                    "Cancel with wrong status code should return 200");
         }
 
         LRAStatus status = getStatus(lraId);
@@ -696,8 +806,8 @@ public class LRAFaultToleranceTest extends LRATestBase {
         enlistParticipantAtPath(lraId, "/base/empty-response-test");
 
         try (Response response = rawCloseLRA(lraId)) {
-            assertTrue(response.getStatus() == 200 || response.getStatus() == 202,
-                    "Close with empty body should return 200 or 202, got " + response.getStatus());
+            assertEquals(200, response.getStatus(),
+                    "Close with empty body should return 200");
         }
 
         LRAStatus status = getStatus(lraId);
@@ -715,8 +825,8 @@ public class LRAFaultToleranceTest extends LRATestBase {
         enlistParticipantAtPath(lraId, "/base/empty-response-test");
 
         try (Response response = rawCancelLRA(lraId)) {
-            assertTrue(response.getStatus() == 200 || response.getStatus() == 202,
-                    "Cancel with empty body should return 200 or 202, got " + response.getStatus());
+            assertEquals(200, response.getStatus(),
+                    "Cancel with empty body should return 200");
         }
 
         LRAStatus status = getStatus(lraId);
@@ -794,17 +904,15 @@ public class LRAFaultToleranceTest extends LRATestBase {
         assertNotNull(closeStatus.get(), "Close thread should have received a response");
         assertNotNull(cancelStatus.get(), "Cancel thread should have received a response");
 
-        // at least one should complete (200/202), the other may get 200, 202 (lock skipped), 404, or 412
-        assertTrue(closeStatus.get() == 200 || closeStatus.get() == 202
-                || cancelStatus.get() == 200 || cancelStatus.get() == 202,
-                "At least one of close or cancel should return 200 or 202, got close=" + closeStatus.get()
+        // no version header = legacy behavior (always 200 for success)
+        // at least one should succeed (200), the other may get 200 (lock skipped), 404, or 412
+        assertTrue(closeStatus.get() == 200 || cancelStatus.get() == 200,
+                "At least one of close or cancel should return 200, got close=" + closeStatus.get()
                         + " cancel=" + cancelStatus.get());
-        assertTrue(closeStatus.get() == 200 || closeStatus.get() == 202
-                || closeStatus.get() == 404 || closeStatus.get() == 412,
-                "Close should return 200, 202, 404, or 412, got " + closeStatus.get());
-        assertTrue(cancelStatus.get() == 200 || cancelStatus.get() == 202
-                || cancelStatus.get() == 404 || cancelStatus.get() == 412,
-                "Cancel should return 200, 202, 404, or 412, got " + cancelStatus.get());
+        assertTrue(closeStatus.get() == 200 || closeStatus.get() == 404 || closeStatus.get() == 412,
+                "Close should return 200, 404, or 412, got " + closeStatus.get());
+        assertTrue(cancelStatus.get() == 200 || cancelStatus.get() == 404 || cancelStatus.get() == 412,
+                "Cancel should return 200, 404, or 412, got " + cancelStatus.get());
 
         // LRA should be in a consistent terminal state
         LRAStatus finalStatus = getStatus(lraId);
@@ -923,7 +1031,7 @@ public class LRAFaultToleranceTest extends LRATestBase {
         URI lraId = lraClient.startLRA(testName);
         enlistParticipantAtPath(lraId, "/base/slow-test");
 
-        try (Response response = rawCloseLRA(lraId)) {
+        try (Response response = rawCloseLRAWithVersion(lraId, LRAConstants.API_VERSION_2_0)) {
             assertEquals(202, response.getStatus(),
                     "Close should return 202 when participant times out");
         }
@@ -944,7 +1052,7 @@ public class LRAFaultToleranceTest extends LRATestBase {
         URI lraId = lraClient.startLRA(testName);
         enlistParticipantAtPath(lraId, "/base/slow-test");
 
-        try (Response response = rawCancelLRA(lraId)) {
+        try (Response response = rawCancelLRAWithVersion(lraId, LRAConstants.API_VERSION_2_0)) {
             assertEquals(202, response.getStatus(),
                     "Cancel should return 202 when participant times out");
         }
@@ -953,6 +1061,149 @@ public class LRAFaultToleranceTest extends LRATestBase {
         assertNotNull(status, "LRA should still exist when participant times out");
         assertTrue(status == LRAStatus.Cancelling || status == LRAStatus.FailedToCancel,
                 "LRA should be Cancelling or FailedToCancel when participant times out, but was " + status);
+    }
+
+    // ===================================================================
+    // 10. API Version Backward Compatibility Tests
+    // ===================================================================
+
+    /**
+     * A client sending API version 1.2 should receive 200 (not 202) for close
+     * even when the LRA is in a non-terminal state (participant unreachable).
+     * This preserves backward compatibility for older clients.
+     */
+    @Test
+    public void testLegacyVersionCloseReturns200ForNonTerminal() {
+        URI lraId = lraClient.startLRA(testName);
+        enlistUnreachableParticipant(lraId);
+
+        try (Response response = rawCloseLRAWithVersion(lraId, LRAConstants.API_VERSION_1_2)) {
+            assertEquals(200, response.getStatus(),
+                    "Close with API version 1.2 should return 200 even for non-terminal state");
+            String body = response.readEntity(String.class);
+            assertTrue(body.contains("Closing") || body.contains("FailedToClose"),
+                    "Body should contain the LRA status, but was: " + body);
+            assertNull(response.getLocation(),
+                    "Legacy 200 response should not include a Location header");
+        }
+    }
+
+    /**
+     * A client sending API version 1.2 should receive 200 (not 202) for cancel
+     * even when the LRA is in a non-terminal state.
+     */
+    @Test
+    public void testLegacyVersionCancelReturns200ForNonTerminal() {
+        URI lraId = lraClient.startLRA(testName);
+        enlistUnreachableParticipant(lraId);
+
+        try (Response response = rawCancelLRAWithVersion(lraId, LRAConstants.API_VERSION_1_2)) {
+            assertEquals(200, response.getStatus(),
+                    "Cancel with API version 1.2 should return 200 even for non-terminal state");
+            String body = response.readEntity(String.class);
+            assertTrue(body.contains("Cancelling") || body.contains("FailedToCancel"),
+                    "Body should contain the LRA status, but was: " + body);
+            assertNull(response.getLocation(),
+                    "Legacy 200 response should not include a Location header");
+        }
+    }
+
+    /**
+     * A client sending API version 2.0 should receive 202 for close when the
+     * LRA is in a non-terminal state, and the response should include a
+     * Location header.
+     */
+    @Test
+    public void testNewVersionCloseReturns202ForNonTerminal() {
+        URI lraId = lraClient.startLRA(testName);
+        enlistUnreachableParticipant(lraId);
+
+        try (Response response = rawCloseLRAWithVersion(lraId, LRAConstants.API_VERSION_2_0)) {
+            assertEquals(202, response.getStatus(),
+                    "Close with API version 2.0 should return 202 for non-terminal state");
+            URI location = response.getLocation();
+            assertNotNull(location,
+                    "202 response with API version 2.0 should include a Location header");
+            assertTrue(location.toASCIIString().contains("/status"),
+                    "Location header should point to the status endpoint, but was: " + location);
+        }
+    }
+
+    /**
+     * A client sending API version 2.0 should receive 202 for cancel when the
+     * LRA is in a non-terminal state.
+     */
+    @Test
+    public void testNewVersionCancelReturns202ForNonTerminal() {
+        URI lraId = lraClient.startLRA(testName);
+        enlistUnreachableParticipant(lraId);
+
+        try (Response response = rawCancelLRAWithVersion(lraId, LRAConstants.API_VERSION_2_0)) {
+            assertEquals(202, response.getStatus(),
+                    "Cancel with API version 2.0 should return 202 for non-terminal state");
+            URI location = response.getLocation();
+            assertNotNull(location,
+                    "202 response with API version 2.0 should include a Location header");
+            assertTrue(location.toASCIIString().contains("/status"),
+                    "Location header should point to the status endpoint, but was: " + location);
+        }
+    }
+
+    /**
+     * Both old and new API versions should return 200 when the LRA closes
+     * successfully (terminal state). The version difference only matters for
+     * non-terminal states.
+     */
+    @Test
+    public void testBothVersionsReturn200ForTerminal() {
+        URI lraId1 = lraClient.startLRA(testName + "-v12");
+        lraClient.clearCurrent(false); // detach from calling thread before raw close
+        enlistParticipant(lraId1);
+
+        try (Response response = rawCloseLRAWithVersion(lraId1, LRAConstants.API_VERSION_1_2)) {
+            assertEquals(200, response.getStatus(),
+                    "Close with version 1.2 should return 200 for terminal state");
+        }
+
+        URI lraId2 = lraClient.startLRA(testName + "-v20");
+        lraClient.clearCurrent(false);
+        enlistParticipant(lraId2);
+
+        try (Response response = rawCloseLRAWithVersion(lraId2, LRAConstants.API_VERSION_2_0)) {
+            assertEquals(200, response.getStatus(),
+                    "Close with version 2.0 should also return 200 for terminal state");
+        }
+    }
+
+    /**
+     * The GET /status endpoint always returns 200 regardless of the LRA state
+     * or the API version. The status value is conveyed in the response body.
+     * This applies to both transitional (Closing/Cancelling) and terminal states.
+     */
+    @Test
+    public void testGetStatusAlwaysReturns200() {
+        URI lraId = lraClient.startLRA(testName);
+        enlistUnreachableParticipant(lraId);
+
+        // close to put the LRA into a transitional state (Closing)
+        rawCloseLRA(lraId).close();
+
+        // status should return 200 even for transitional states, regardless of version
+        try (Response response = rawGetStatusWithVersion(lraId, LRAConstants.API_VERSION_1_2)) {
+            assertEquals(200, response.getStatus(),
+                    "GET /status should return 200 for transitional state with version 1.2");
+            String body = response.readEntity(String.class);
+            assertTrue(body.contains("Closing") || body.contains("FailedToClose"),
+                    "Body should contain the LRA status, but was: " + body);
+        }
+
+        try (Response response = rawGetStatusWithVersion(lraId, LRAConstants.API_VERSION_2_0)) {
+            assertEquals(200, response.getStatus(),
+                    "GET /status should return 200 for transitional state with version 2.0");
+            String body = response.readEntity(String.class);
+            assertTrue(body.contains("Closing") || body.contains("FailedToClose"),
+                    "Body should contain the LRA status, but was: " + body);
+        }
     }
 
 }

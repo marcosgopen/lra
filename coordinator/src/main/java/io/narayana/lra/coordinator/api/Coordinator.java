@@ -6,6 +6,8 @@
 package io.narayana.lra.coordinator.api;
 
 import static io.narayana.lra.LRAConstants.API_VERSION_1_0;
+import static io.narayana.lra.LRAConstants.API_VERSION_1_1;
+import static io.narayana.lra.LRAConstants.API_VERSION_1_2;
 import static io.narayana.lra.LRAConstants.CLIENT_ID_PARAM_NAME;
 import static io.narayana.lra.LRAConstants.COMPENSATE;
 import static io.narayana.lra.LRAConstants.COMPLETE;
@@ -93,7 +95,7 @@ import org.eclipse.microprofile.openapi.annotations.tags.Tag;
 @ApplicationScoped
 @ApplicationPath("/")
 @Path(COORDINATOR_PATH_NAME)
-@OpenAPIDefinition(info = @Info(title = "LRA Coordinator", version = LRAConstants.CURRENT_API_VERSION_STRING, contact = @Contact(name = "Narayana", url = "https://narayana.io")), tags = @Tag(name = "LRA Coordinator"), components = @Components(schemas = {
+@OpenAPIDefinition(info = @Info(title = "LRA Coordinator", version = LRAConstants.API_VERSION_2_0, contact = @Contact(name = "Narayana", url = "https://narayana.io")), tags = @Tag(name = "LRA Coordinator"), components = @Components(schemas = {
         @Schema(name = "LRAApiVersionSchema", description = "Format is `major.minor`, both components are required, they are to be numbers", type = SchemaType.STRING, pattern = "^\\d+\\.\\d+$", example = "1.0")
 }, parameters = {
         @Parameter(name = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME, in = ParameterIn.HEADER, description = "Narayana LRA API version", schema = @Schema(ref = "LRAApiVersionSchema"))
@@ -194,8 +196,10 @@ public class Coordinator extends Application {
     @Produces({ MediaType.APPLICATION_JSON, MediaType.TEXT_PLAIN })
     @Operation(summary = "Obtain the status of an LRA as a string")
     @APIResponses({
-            @APIResponse(responseCode = "200", description = "The LRA exists. The status is reported in the content body.", content = @Content(schema = @Schema(implementation = String.class)), headers = {
-                    @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
+            @APIResponse(responseCode = "200", description = "The LRA exists and the status is reported in the content body."
+                    + " The status may be any LRAStatus value: Active, Closing, Cancelling,"
+                    + " Closed, Cancelled, FailedToClose, or FailedToCancel.", content = @Content(schema = @Schema(implementation = String.class)), headers = {
+                            @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
             @APIResponse(responseCode = "404", description = "The coordinator has no knowledge of this LRA", content = @Content(schema = @Schema(implementation = String.class))),
             @APIResponse(responseCode = "417", description = "The requested version provided in HTTP Header is not supported by this end point", content = @Content(schema = @Schema(implementation = String.class))),
     })
@@ -425,7 +429,7 @@ public class Coordinator extends Application {
 
         LRAData lraData = lraService.endLRA(toURI(nestedLraId), false, false, null, null);
 
-        return buildResponse(mapToParticipantStatus(lraData.getStatus()).name(), version, mediaType);
+        return buildNestedResponse(mapToParticipantStatus(lraData.getStatus()).name(), version, mediaType);
     }
 
     @PUT
@@ -437,7 +441,7 @@ public class Coordinator extends Application {
 
         LRAData lraData = lraService.endLRA(toURI(nestedLraId), true, true, null, null);
 
-        return buildResponse(mapToParticipantStatus(lraData.getStatus()).name(), version, mediaType);
+        return buildNestedResponse(mapToParticipantStatus(lraData.getStatus()).name(), version, mediaType);
     }
 
     @PUT
@@ -465,11 +469,23 @@ public class Coordinator extends Application {
             + " The invoker cannot know for sure whether the lra completed"
             + " or compensated without enlisting a participant.")
     @APIResponses({
-            @APIResponse(responseCode = "200", description = "The complete message was sent to all coordinators", content = @Content(schema = @Schema(implementation = String.class)), headers = {
+            @APIResponse(responseCode = "200", description = "The LRA closed successfully and all participants have completed."
+                    + " The response body contains the terminal LRA status.", content = @Content(schema = @Schema(implementation = String.class)), headers = {
+                            @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
+            @APIResponse(responseCode = "202", description = "The close request has been accepted but one or more participants have not yet responded."
+                    + " The response body contains the current LRA status (Closing)."
+                    + " A Location header points to the status endpoint for polling."
+                    + " Clients should poll the status endpoint to track progress."
+                    + " Requires Narayana-LRA-API-version 2.0 or later;"
+                    + " older versions receive 200 for all states.", content = @Content(schema = @Schema(implementation = String.class)), headers = {
+                            @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
+            @APIResponse(responseCode = "404", description = "No LRA exists with the given identifier", content = @Content(schema = @Schema(implementation = String.class)), headers = {
                     @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
-            @APIResponse(responseCode = "404", description = "The coordinator has no knowledge of this LRA", content = @Content(schema = @Schema(implementation = String.class)), headers = {
-                    @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
-            @APIResponse(responseCode = "417", description = "The requested version provided in HTTP Header is not supported by this end point", content = @Content(schema = @Schema(implementation = String.class))),
+            @APIResponse(responseCode = "412", description = "The LRA is no longer in an active state and cannot be closed", content = @Content(schema = @Schema(implementation = String.class))),
+            @APIResponse(responseCode = "417", description = "The requested API version is not supported by this endpoint", content = @Content(schema = @Schema(implementation = String.class))),
+            @APIResponse(responseCode = "503", description = "The coordinator could not process the request due to a transient failure"
+                    + " (storage unavailable or lock contention with another close/cancel in progress)."
+                    + " The client should retry the request.", content = @Content(schema = @Schema(implementation = String.class))),
     })
     public Response closeLRA(
             @Parameter(name = "LraId", description = "The unique identifier of the LRA", required = true) @PathParam("LraId") String lraId,
@@ -479,16 +495,20 @@ public class Coordinator extends Application {
             @HeaderParam(LRAConstants.NARAYANA_LRA_PARTICIPANT_DATA_HEADER_NAME) @DefaultValue("") String userData) {
 
         try {
-            LRAData lraData = lraService.endLRA(toURI(lraId), false, false, compensator, userData);
+            URI lraURI = toURI(lraId);
+            LRAData lraData = lraService.endLRA(lraURI, false, false, compensator, userData);
 
-            return buildResponse(lraData.getStatus().name(), version, mediaType);
+            return buildResponse(lraData.getStatus(), version, mediaType, lraURI);
         } catch (WebApplicationException e) {
             LRALogger.logger.debug(e.getMessage());
             // catch it otherwise the caller just sees a generic message corresponding to e.getResponse().getStatus()
             // eg for a 503 it would be "Service Unavailable"
             // and if we throw new WebApplicationException(e.getMessage(), e);
             // then the caller sees the generic 500 Internal Server Error code rather than the specific 503 code
-            return Response.status(e.getResponse().getStatus()).entity(e.getMessage()).build();
+            return Response.status(e.getResponse().getStatus())
+                    .entity(e.getMessage())
+                    .header(NARAYANA_LRA_API_VERSION_HEADER_NAME, version)
+                    .build();
         }
     }
 
@@ -500,11 +520,23 @@ public class Coordinator extends Application {
             + " Upon termination, the URL is implicitly deleted."
             + " The invoker cannot know for sure whether the lra completed or compensated without enlisting a participant.")
     @APIResponses({
-            @APIResponse(responseCode = "200", description = "The compensate message was sent to all coordinators", content = @Content(schema = @Schema(implementation = String.class)), headers = {
+            @APIResponse(responseCode = "200", description = "The LRA cancelled successfully and all participants have compensated."
+                    + " The response body contains the terminal LRA status.", content = @Content(schema = @Schema(implementation = String.class)), headers = {
+                            @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
+            @APIResponse(responseCode = "202", description = "The cancel request has been accepted but one or more participants have not yet responded."
+                    + " The response body contains the current LRA status (Cancelling)."
+                    + " A Location header points to the status endpoint for polling."
+                    + " Clients should poll the status endpoint to track progress."
+                    + " Requires Narayana-LRA-API-version 2.0 or later;"
+                    + " older versions receive 200 for all states.", content = @Content(schema = @Schema(implementation = String.class)), headers = {
+                            @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
+            @APIResponse(responseCode = "404", description = "No LRA exists with the given identifier", content = @Content(schema = @Schema(implementation = String.class)), headers = {
                     @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
-            @APIResponse(responseCode = "404", description = "The coordinator has no knowledge of this LRA", content = @Content(schema = @Schema(implementation = String.class)), headers = {
-                    @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
-            @APIResponse(responseCode = "417", description = "The requested version provided in HTTP Header is not supported by this end point", content = @Content(schema = @Schema(implementation = String.class))),
+            @APIResponse(responseCode = "412", description = "The LRA is no longer in an active state and cannot be cancelled", content = @Content(schema = @Schema(implementation = String.class))),
+            @APIResponse(responseCode = "417", description = "The requested API version is not supported by this endpoint", content = @Content(schema = @Schema(implementation = String.class))),
+            @APIResponse(responseCode = "503", description = "The coordinator could not process the request due to a transient failure"
+                    + " (storage unavailable or lock contention with another close/cancel in progress)."
+                    + " The client should retry the request.", content = @Content(schema = @Schema(implementation = String.class))),
     })
     public Response cancelLRA(
             @Parameter(name = "LraId", description = "The unique identifier of the LRA", required = true) @PathParam("LraId") String lraId,
@@ -514,12 +546,16 @@ public class Coordinator extends Application {
             @HeaderParam(LRAConstants.NARAYANA_LRA_PARTICIPANT_DATA_HEADER_NAME) @DefaultValue("") String userData) {
 
         try {
-            LRAData lraData = lraService.endLRA(toURI(lraId), true, false, compensator, userData);
+            URI lraURI = toURI(lraId);
+            LRAData lraData = lraService.endLRA(lraURI, true, false, compensator, userData);
 
-            return buildResponse(lraData.getStatus().name(), version, mediaType);
+            return buildResponse(lraData.getStatus(), version, mediaType, lraURI);
         } catch (WebApplicationException e) {
             LRALogger.logger.debug(e.getMessage());
-            return Response.status(e.getResponse().getStatus()).entity(e.getMessage()).build();
+            return Response.status(e.getResponse().getStatus())
+                    .entity(e.getMessage())
+                    .header(NARAYANA_LRA_API_VERSION_HEADER_NAME, version)
+                    .build();
         }
     }
 
@@ -716,7 +752,55 @@ public class Coordinator extends Application {
                 .build();
     }
 
-    private Response buildResponse(String status, String apiVersion, String mediaType) {
+    private Response buildResponse(LRAStatus lraStatus, String apiVersion, String mediaType, URI lraId) {
+        // API version 2.0+ distinguishes three cases:
+        //   200 OK       — terminal state (Closed, Cancelled, FailedToClose, FailedToCancel)
+        //   202 Accepted — transitional state (Closing, Cancelling): the coordinator tried
+        //                   to end the LRA but participants haven't all responded yet
+        //   503 Service Unavailable — Active: the coordinator could not process the request
+        //                   (e.g. lock contention), client should retry
+        // Older versions always return 200 for backward compatibility.
+        int httpStatus;
+        if (isTerminal(lraStatus)) {
+            httpStatus = Response.Status.OK.getStatusCode();
+        } else if (!supportsAcceptedStatus(apiVersion)) {
+            httpStatus = Response.Status.OK.getStatusCode(); // legacy behavior
+        } else if (lraStatus == LRAStatus.Closing || lraStatus == LRAStatus.Cancelling) {
+            httpStatus = Response.Status.ACCEPTED.getStatusCode();
+        } else {
+            // Active after a close/cancel call means the coordinator could not process
+            // the request (e.g. lock contention). Signal the client to retry.
+            httpStatus = Response.Status.SERVICE_UNAVAILABLE.getStatusCode();
+        }
+
+        String statusName = lraStatus.name();
+
+        Response.ResponseBuilder builder = Response.status(httpStatus)
+                .header(NARAYANA_LRA_API_VERSION_HEADER_NAME, apiVersion);
+
+        // For 202 responses, include a Location header pointing to the status endpoint
+        // so clients know where to poll for the outcome.
+        if (httpStatus == Response.Status.ACCEPTED.getStatusCode() && lraId != null) {
+            URI statusUri = URI.create(String.format("%s%s/%s/status",
+                    context.getBaseUri(), COORDINATOR_PATH_NAME, LRAConstants.getLRAUid(lraId)));
+            builder.location(statusUri);
+        }
+
+        if (mediaType.equals(MediaType.APPLICATION_JSON)) {
+            JsonObject model = Json.createObjectBuilder()
+                    .add("status", statusName)
+                    .build();
+            return builder.entity(model.toString()).build();
+        } else { // produce MediaType.TEXT_PLAIN
+            return builder.entity(statusName).build();
+        }
+    }
+
+    /**
+     * Build a response for nested LRA endpoints that return ParticipantStatus names.
+     * Nested endpoints always return 200 since they report participant-level status.
+     */
+    private Response buildNestedResponse(String status, String apiVersion, String mediaType) {
         if (mediaType.equals(MediaType.APPLICATION_JSON)) {
             JsonObject model = Json.createObjectBuilder()
                     .add("status", status)
@@ -725,11 +809,31 @@ public class Coordinator extends Application {
             return Response.ok(model.toString())
                     .header(NARAYANA_LRA_API_VERSION_HEADER_NAME, apiVersion)
                     .build();
-        } else { // produce MediaType.TEXT_PLAIN
+        } else {
             return Response.ok(status)
                     .header(NARAYANA_LRA_API_VERSION_HEADER_NAME, apiVersion)
                     .build();
         }
+    }
+
+    private static boolean isTerminal(LRAStatus status) {
+        return status == LRAStatus.Closed || status == LRAStatus.Cancelled
+                || status == LRAStatus.FailedToClose || status == LRAStatus.FailedToCancel;
+    }
+
+    /**
+     * Returns true if the client API version supports 202 Accepted responses
+     * for non-terminal/transitional LRA states. Versions prior to 2.0 always
+     * received 200 regardless of LRA state.
+     *
+     * Defaults to false (legacy behavior) when the version header is absent,
+     * null, or unrecognised so that existing clients are not surprised by 202.
+     */
+    private static boolean supportsAcceptedStatus(String version) {
+        return version != null
+                && !version.equals(API_VERSION_1_0)
+                && !version.equals(API_VERSION_1_1)
+                && !version.equals(API_VERSION_1_2);
     }
 
     private URI toURI(String lraId) {

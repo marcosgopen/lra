@@ -324,7 +324,13 @@ public class LRAService {
             }
         }
 
-        finished(transaction, fromHierarchy);
+        // Only call finished() if finishLRA actually processed the LRA.
+        // If the LRA is still Active it means the lock could not be acquired
+        // (another thread is already finishing it) and we must not call finished()
+        // because that could prematurely remove an Active LRA from the map.
+        if (transaction.getLRAStatus() != LRAStatus.Active) {
+            finished(transaction, fromHierarchy);
+        }
 
         return transaction.getLRAData();
     }

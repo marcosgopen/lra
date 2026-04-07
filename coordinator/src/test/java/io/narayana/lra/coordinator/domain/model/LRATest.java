@@ -1340,7 +1340,7 @@ public class LRATest extends LRATestBase {
             @BMRule(name = "fail deactivate during close", targetClass = "io.narayana.lra.coordinator.domain.model.LongRunningAction", targetMethod = "updateState(LRAStatus, boolean)", targetLocation = "AFTER INVOKE deactivate", action = "$! = false;")
     })
     public void testCancelFailure() {
-        testEndFailure(true);
+        testEndFailure(false);
     }
 
     public void testEndFailure(boolean closeLRA) {

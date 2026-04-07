@@ -42,7 +42,6 @@ import jakarta.ws.rs.ApplicationPath;
 import jakarta.ws.rs.DefaultValue;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
-import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
@@ -514,11 +513,12 @@ public class Coordinator extends Application {
             @HeaderParam(LRAConstants.NARAYANA_LRA_PARTICIPANT_LINK_HEADER_NAME) @DefaultValue("") String compensator,
             @HeaderParam(LRAConstants.NARAYANA_LRA_PARTICIPANT_DATA_HEADER_NAME) @DefaultValue("") String userData) {
 
-        LRAData lraData = lraService.endLRA(toURI(lraId), true, false, compensator, userData);
-
         try {
+            LRAData lraData = lraService.endLRA(toURI(lraId), true, false, compensator, userData);
+
             return buildResponse(lraData.getStatus().name(), version, mediaType);
-        } catch (NotFoundException e) {
+        } catch (WebApplicationException e) {
+            LRALogger.logger.debug(e.getMessage());
             return Response.status(e.getResponse().getStatus()).entity(e.getMessage()).build();
         }
     }

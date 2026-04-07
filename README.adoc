@@ -10,7 +10,7 @@ toc::[]
 == Prerequisites
 
 * JDK 17 or later
-* Maven 3.x (or use the included Maven Wrapper `./mvnw`)
+* Maven (version 3.9.x recommended or use the included Maven Wrapper ./mvnw)
 
 == Building the Project
 

@@ -245,10 +245,30 @@
         <version>${version.jboss-modules}</version>
       </dependency>
 
-      <!-- undertow with RestEasy -->
+      <!-- RestEasy -->
       <dependency>
         <groupId>org.jboss.resteasy</groupId>
         <artifactId>resteasy-client</artifactId>
+        <version>${version.org.jboss.resteasy}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.jboss.resteasy</groupId>
+        <artifactId>resteasy-client-api</artifactId>
+        <version>${version.org.jboss.resteasy}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.jboss.resteasy</groupId>
+        <artifactId>resteasy-core</artifactId>
+        <version>${version.org.jboss.resteasy}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.jboss.resteasy</groupId>
+        <artifactId>resteasy-core-spi</artifactId>
+        <version>${version.org.jboss.resteasy}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.jboss.resteasy</groupId>
+        <artifactId>resteasy-jackson2-provider</artifactId>
         <version>${version.org.jboss.resteasy}</version>
       </dependency>
       <dependency>
@@ -363,11 +383,6 @@
         <groupId>org.eclipse.microprofile.lra</groupId>
         <artifactId>microprofile-lra-tck</artifactId>
         <version>${version.microprofile.lra}</version>
-      </dependency>
-      <dependency>
-        <groupId>org.jboss.resteasy</groupId>
-        <artifactId>resteasy-jackson2-provider</artifactId>
-        <version>${version.org.jboss.resteasy}</version>
       </dependency>
 
       <!-- test dependencies -->

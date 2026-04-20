@@ -18,6 +18,9 @@ import static io.narayana.lra.LRAConstants.NARAYANA_LRA_PARTICIPANT_DATA_HEADER_
 import static io.narayana.lra.LRAConstants.PARENT_LRA_PARAM_NAME;
 import static io.narayana.lra.LRAConstants.PARTICIPANT_TIMEOUT;
 import static io.narayana.lra.LRAConstants.RECOVERY_COORDINATOR_PATH_NAME;
+import static io.narayana.lra.LRAConstants.ROLE_ADMIN;
+import static io.narayana.lra.LRAConstants.ROLE_NESTED;
+import static io.narayana.lra.LRAConstants.ROLE_PARTICIPANT;
 import static io.narayana.lra.LRAConstants.STATUS;
 import static io.narayana.lra.LRAConstants.STATUS_PARAM_NAME;
 import static io.narayana.lra.LRAConstants.TIMELIMIT_PARAM_NAME;
@@ -36,7 +39,9 @@ import io.narayana.lra.LRAData;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.domain.service.LRAService;
 import io.narayana.lra.coordinator.internal.LRARecoveryModule;
+import io.narayana.lra.coordinator.security.JwtTokenContext;
 import io.narayana.lra.logging.LRALogger;
+import jakarta.annotation.security.RolesAllowed;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.json.Json;
 import jakarta.json.JsonObject;
@@ -53,7 +58,6 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.ServiceUnavailableException;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.client.Client;
-import jakarta.ws.rs.client.ClientBuilder;
 import jakarta.ws.rs.client.Entity;
 import jakarta.ws.rs.core.Application;
 import jakarta.ws.rs.core.Context;
@@ -149,6 +153,7 @@ public class Coordinator extends Application {
                     @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
             @APIResponse(responseCode = "417", description = "The requested version provided in HTTP Header is not supported by this end point", content = @Content(schema = @Schema(implementation = String.class))),
     })
+    @RolesAllowed(ROLE_ADMIN)
     public Response getAllLRAs(
             @Parameter(name = STATUS_PARAM_NAME, description = "Filter the returned LRAs to only those in the give state (see CompensatorStatus)") @QueryParam(STATUS_PARAM_NAME) @DefaultValue("") String state,
             @HeaderParam(HttpHeaders.ACCEPT) @DefaultValue(MediaType.TEXT_PLAIN) String mediaType,
@@ -203,6 +208,7 @@ public class Coordinator extends Application {
             @APIResponse(responseCode = "404", description = "The coordinator has no knowledge of this LRA", content = @Content(schema = @Schema(implementation = String.class))),
             @APIResponse(responseCode = "417", description = "The requested version provided in HTTP Header is not supported by this end point", content = @Content(schema = @Schema(implementation = String.class))),
     })
+    @RolesAllowed(ROLE_ADMIN)
     public Response getLRAStatus(
             @Parameter(name = "LraId", description = "The unique identifier of the LRA." +
                     "Expecting to be a valid URL where the participant can be contacted at. If not in URL format it will be considered "
@@ -240,6 +246,7 @@ public class Coordinator extends Application {
             @APIResponse(responseCode = "404", description = "The coordinator has no knowledge of this LRA", content = @Content(schema = @Schema(implementation = String.class))),
             @APIResponse(responseCode = "417", description = "The requested version provided in HTTP Header is not supported by this end point", content = @Content(schema = @Schema(implementation = String.class))),
     })
+    @RolesAllowed(ROLE_ADMIN)
     public Response getLRAInfo(
             @Parameter(name = "LraId", description = "The unique identifier of the LRA", required = true) @PathParam("LraId") String lraId,
             @HeaderParam(HttpHeaders.ACCEPT) @DefaultValue(MediaType.TEXT_PLAIN) String mediaType,
@@ -278,6 +285,7 @@ public class Coordinator extends Application {
             @APIResponse(responseCode = "417", description = "The requested version provided in HTTP Header is not supported by this end point", content = @Content(schema = @Schema(implementation = String.class))),
             @APIResponse(responseCode = "500", description = "A new LRA could not be started. Coordinator internal error.", content = @Content(schema = @Schema(implementation = String.class)))
     })
+    @RolesAllowed(ROLE_ADMIN)
     public Response startLRA(
             @Parameter(name = CLIENT_ID_PARAM_NAME, description = "Each client is expected to have a unique identity (which can be a URL).", required = true) @QueryParam(CLIENT_ID_PARAM_NAME) @DefaultValue("") String clientId,
             @Parameter(name = TIMELIMIT_PARAM_NAME, description = "Specifies the maximum time in milli seconds that the LRA will exist for.\n"
@@ -299,7 +307,7 @@ public class Coordinator extends Application {
 
             if (!lraService.hasTransaction(parentId)) {
 
-                try (Client client = ClientBuilder.newClient()) {
+                try (Client client = JwtTokenContext.newClient()) {
                     try (Response response = client.target(parentId)
                             .request()
                             .header(NARAYANA_LRA_API_VERSION_HEADER_NAME, CURRENT_API_VERSION_STRING)
@@ -358,6 +366,7 @@ public class Coordinator extends Application {
                             @Header(ref = LRAConstants.NARAYANA_LRA_API_VERSION_HEADER_NAME) }),
             @APIResponse(responseCode = "417", description = "The requested version provided in HTTP Header is not supported by this end point", content = @Content(schema = @Schema(implementation = String.class))),
     })
+    @RolesAllowed(ROLE_ADMIN)
     public Response renewTimeLimit(
             @Parameter(name = "LraId", description = "The unique identifier of the LRA", required = true) @PathParam("LraId") String lraId,
             @Parameter(name = TIMELIMIT_PARAM_NAME, description = "The new time limit for the LRA", required = true) @QueryParam(TIMELIMIT_PARAM_NAME) @DefaultValue("0") Long timeLimit,
@@ -370,6 +379,7 @@ public class Coordinator extends Application {
 
     @GET
     @Path("nested/{NestedLraId}/status")
+    @RolesAllowed(ROLE_NESTED)
     public Response getNestedLRAStatus(@PathParam("NestedLraId") String nestedLraId) {
         // needed to decode string passed from clients
         String decodedURL = URLDecoder.decode(nestedLraId, StandardCharsets.UTF_8);
@@ -422,6 +432,7 @@ public class Coordinator extends Application {
 
     @PUT
     @Path("nested/{NestedLraId}/complete")
+    @RolesAllowed(ROLE_NESTED)
     public Response completeNestedLRA(
             @PathParam("NestedLraId") String nestedLraId,
             @HeaderParam(HttpHeaders.ACCEPT) @DefaultValue(MediaType.TEXT_PLAIN) String mediaType,
@@ -434,6 +445,7 @@ public class Coordinator extends Application {
 
     @PUT
     @Path("nested/{NestedLraId}/compensate")
+    @RolesAllowed(ROLE_NESTED)
     public Response compensateNestedLRA(
             @PathParam("NestedLraId") String nestedLraId,
             @HeaderParam(HttpHeaders.ACCEPT) @DefaultValue(MediaType.TEXT_PLAIN) String mediaType,
@@ -446,6 +458,7 @@ public class Coordinator extends Application {
 
     @PUT
     @Path("nested/{NestedLraId}/forget")
+    @RolesAllowed(ROLE_NESTED)
     public Response forgetNestedLRA(@PathParam("NestedLraId") String nestedLraId) {
         lraService.remove(toURI(nestedLraId));
 
@@ -487,6 +500,7 @@ public class Coordinator extends Application {
                     + " (storage unavailable or lock contention with another close/cancel in progress)."
                     + " The client should retry the request.", content = @Content(schema = @Schema(implementation = String.class))),
     })
+    @RolesAllowed(ROLE_ADMIN)
     public Response closeLRA(
             @Parameter(name = "LraId", description = "The unique identifier of the LRA", required = true) @PathParam("LraId") String lraId,
             @HeaderParam(HttpHeaders.ACCEPT) @DefaultValue(MediaType.TEXT_PLAIN) String mediaType,
@@ -538,6 +552,7 @@ public class Coordinator extends Application {
                     + " (storage unavailable or lock contention with another close/cancel in progress)."
                     + " The client should retry the request.", content = @Content(schema = @Schema(implementation = String.class))),
     })
+    @RolesAllowed(ROLE_ADMIN)
     public Response cancelLRA(
             @Parameter(name = "LraId", description = "The unique identifier of the LRA", required = true) @PathParam("LraId") String lraId,
             @HeaderParam(HttpHeaders.ACCEPT) @DefaultValue(MediaType.TEXT_PLAIN) String mediaType,
@@ -577,6 +592,7 @@ public class Coordinator extends Application {
             @APIResponse(responseCode = "417", description = "The requested version provided in HTTP Header is not supported by this end point", content = @Content(schema = @Schema(implementation = String.class))),
             @APIResponse(responseCode = "500", description = "Format of the compensator data (e.g. Link format) could not be processed", content = @Content(schema = @Schema(implementation = String.class))),
     })
+    @RolesAllowed(ROLE_PARTICIPANT)
     public Response joinLRAViaBody(
             @Parameter(name = "LraId", description = "The unique identifier of the LRA", required = true) @PathParam("LraId") String lraId,
             @Parameter(name = TIMELIMIT_PARAM_NAME, description = "The time limit in milliseconds that the Compensator can guarantee that it can compensate "
@@ -740,6 +756,7 @@ public class Coordinator extends Application {
             @APIResponse(responseCode = "412", description = "The LRA is not longer active (ie in the complete or compensate messages have been sent"),
             @APIResponse(responseCode = "417", description = "The requested version provided in HTTP Header is not supported by this end point", content = @Content(schema = @Schema(implementation = String.class))),
     })
+    @RolesAllowed(ROLE_PARTICIPANT)
     public Response leaveLRA(
             @Parameter(name = "LraId", description = "The unique identifier of the LRA", required = true) @PathParam("LraId") String lraId,
             @HeaderParam(HttpHeaders.ACCEPT) @DefaultValue(MediaType.TEXT_PLAIN) String mediaType,

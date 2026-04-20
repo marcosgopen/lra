@@ -5,7 +5,9 @@
 
 package io.narayana.lra.client;
 
+import io.narayana.lra.LRAConstants;
 import io.narayana.lra.logging.LRALogger;
+import jakarta.enterprise.inject.spi.CDI;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.security.KeyStore;
@@ -49,7 +51,7 @@ public class RestClientConfig {
     private static final String HOSTNAME_VERIFIER_KEY = CONFIG_PREFIX + "hostnameVerifier";
     private static final String CONNECT_TIMEOUT_KEY = CONFIG_PREFIX + "connectTimeout";
     private static final String READ_TIMEOUT_KEY = CONFIG_PREFIX + "readTimeout";
-    private static final String PROVIDERS_KEY = CONFIG_PREFIX + "providers";
+    private static final String PROVIDERS_KEY = LRAConstants.HTTP_CLIENT_PROVIDERS;
 
     private static final String DEFAULT_KEYSTORE_TYPE = "JKS";
 
@@ -82,6 +84,7 @@ public class RestClientConfig {
         configureSSL(builder);
         configureTimeouts(builder);
         configureProviders(builder);
+        configureBearerToken(builder);
         return builder;
     }
 
@@ -233,6 +236,28 @@ public class RestClientConfig {
                     LRALogger.logger.warnf(e, "Failed to load provider class %s: %s",
                             trimmed, e.getMessage());
                 }
+            }
+        }
+    }
+
+    /**
+     * Captures the current bearer token from CDI (if available) and stores it as a
+     * builder property so that client request filters can access it on async threads.
+     */
+    private void configureBearerToken(RestClientBuilder builder) {
+        try {
+            org.eclipse.microprofile.jwt.JsonWebToken jwt = CDI.current()
+                    .select(org.eclipse.microprofile.jwt.JsonWebToken.class).get();
+            String token = jwt.getRawToken();
+            if (token != null) {
+                builder.property(LRAConstants.BEARER_TOKEN_PROPERTY, token);
+                if (LRALogger.logger.isTraceEnabled()) {
+                    LRALogger.logger.trace("Bearer token from CDI JsonWebToken configured on REST client builder");
+                }
+            }
+        } catch (Exception e) {
+            if (LRALogger.logger.isDebugEnabled()) {
+                LRALogger.logger.debugf("CDI JsonWebToken not available for REST client: %s", e.getMessage());
             }
         }
     }

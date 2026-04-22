@@ -39,6 +39,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.json.Json;
 import jakarta.json.JsonObject;
 import jakarta.ws.rs.ApplicationPath;
+import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.DefaultValue;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
@@ -440,7 +441,7 @@ public class Coordinator extends Application {
         return buildResponse(mapToParticipantStatus(lraData.getStatus()).name(), version, mediaType);
     }
 
-    @PUT
+    @DELETE
     @Path("nested/{NestedLraId}/forget")
     public Response forgetNestedLRA(@PathParam("NestedLraId") String nestedLraId) {
         lraService.remove(toURI(nestedLraId));

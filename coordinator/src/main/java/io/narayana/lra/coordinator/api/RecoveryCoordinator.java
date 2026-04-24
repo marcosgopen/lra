@@ -5,6 +5,7 @@
 
 package io.narayana.lra.coordinator.api;
 
+import static io.narayana.lra.LRAConstants.ROLE_ADMIN;
 import static jakarta.ws.rs.core.Response.Status.BAD_REQUEST;
 import static jakarta.ws.rs.core.Response.Status.INTERNAL_SERVER_ERROR;
 import static jakarta.ws.rs.core.Response.Status.NOT_FOUND;
@@ -15,6 +16,7 @@ import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.domain.service.LRAService;
 import io.narayana.lra.coordinator.internal.LRARecoveryModule;
 import io.narayana.lra.logging.LRALogger;
+import jakarta.annotation.security.RolesAllowed;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.NotFoundException;
@@ -59,6 +61,7 @@ public class RecoveryCoordinator {
             @APIResponse(responseCode = "404", description = "The coordinator has no knowledge of this participant"),
             @APIResponse(responseCode = "200", description = "The participant associated with this recovery id is returned", content = @Content(schema = @Schema(title = "The original participant URI")))
     })
+    @RolesAllowed(ROLE_ADMIN)
     public String getCompensator(
             @Parameter(name = "LRAId", description = "Identifies the LRAId that the participant joined", required = true) @PathParam("LRAId") String lraId,
             @Parameter(name = "RecCoordId", description = "An identifier that was returned by the coordinator when a participant joined the LRA", required = true) @PathParam("RecCoordId") String rcvCoordId,
@@ -91,6 +94,7 @@ public class RecoveryCoordinator {
             @APIResponse(responseCode = "404", description = "The coordinator has no knowledge of this participant"),
             @APIResponse(responseCode = "200", description = "The coordinator has replaced the old participant with the new one")
     })
+    @RolesAllowed(ROLE_ADMIN)
     public String replaceCompensator(
             @Parameter(name = "LRAId", description = "Identifies the LRAId that the participant joined", required = true) @PathParam("LRAId") String lraId,
             @Parameter(name = "RecCoordId", description = "An identifier that was returned by the coordinator when a participant joined the LRA", required = true) @PathParam("RecCoordId") String rcvCoordId,
@@ -131,6 +135,7 @@ public class RecoveryCoordinator {
     @Produces(MediaType.APPLICATION_JSON)
     @Operation(summary = "List recovering Long Running Actions", description = "Returns LRAs that are recovering (ie some participants still need to be ran)")
     @APIResponse(responseCode = "200", content = @Content(schema = @Schema(type = SchemaType.ARRAY, implementation = LRAData.class)))
+    @RolesAllowed(ROLE_ADMIN)
     public List<LRAData> getRecoveringLRAs() {
         return lraService.getAllRecovering(true);
     }
@@ -142,6 +147,7 @@ public class RecoveryCoordinator {
             " Failure records are vital pieces of data needed to aid failure tracking and analysis " +
             " and are retained for inspection.")
     @APIResponse(responseCode = "200", content = @Content(schema = @Schema(type = SchemaType.ARRAY, implementation = LRAData.class)))
+    @RolesAllowed(ROLE_ADMIN)
     public List<LRAData> getFailedLRAs() {
         return lraService.getFailedLRAs();
     }
@@ -158,6 +164,7 @@ public class RecoveryCoordinator {
                     +
                     "discriminate between a failure at the log storage level or if the log did not exist)")
     })
+    @RolesAllowed(ROLE_ADMIN)
     public Response deleteFailedLRA(
             @Parameter(name = "LraId", description = "The unique identifier of the LRA", required = true) @PathParam("LraId") String lraId)
             throws NotFoundException {

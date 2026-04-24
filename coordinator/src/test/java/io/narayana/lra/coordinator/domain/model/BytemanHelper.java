@@ -6,6 +6,7 @@ package io.narayana.lra.coordinator.domain.model;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -22,6 +23,29 @@ import java.util.concurrent.TimeUnit;
 public class BytemanHelper {
 
     private static final ConcurrentHashMap<String, CountDownLatch> latches = new ConcurrentHashMap<>();
+    private static final Set<String> flags = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Set a named flag. Use from the test thread to enable a Byteman rule condition.
+     */
+    public static void setFlag(String name) {
+        flags.add(name);
+    }
+
+    /**
+     * Clear a named flag. Use from the test thread to disable a Byteman rule condition.
+     */
+    public static void clearFlag(String name) {
+        flags.remove(name);
+    }
+
+    /**
+     * Check whether a named flag is set. Use in {@code @BMRule} conditions
+     * to make rules toggleable at runtime.
+     */
+    public static boolean isFlagSet(String name) {
+        return flags.contains(name);
+    }
 
     /**
      * Create a rendezvous point. Call from the test thread before the event.

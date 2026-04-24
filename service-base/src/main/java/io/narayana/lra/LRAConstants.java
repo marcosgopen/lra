@@ -35,6 +35,7 @@ public final class LRAConstants {
     public static final String API_VERSION_1_0 = "1.0";
     public static final String API_VERSION_1_1 = "1.1";
     public static final String API_VERSION_1_2 = "1.2";
+    public static final String API_VERSION_2_0 = "2.0";
 
     /*
      * Supported Narayana LRA API versions.
@@ -46,7 +47,8 @@ public final class LRAConstants {
     public static final String[] NARAYANA_LRA_API_SUPPORTED_VERSIONS = new String[] {
             API_VERSION_1_0,
             API_VERSION_1_1,
-            API_VERSION_1_2
+            API_VERSION_1_2,
+            API_VERSION_2_0
     };
 
     /**
@@ -66,6 +68,16 @@ public final class LRAConstants {
      */
     public static final long PARTICIPANT_TIMEOUT = 2;
     public static final String ALLOW_PARTICIPANT_DATA = "lra.participant.data";
+
+    public static final String HTTP_CLIENT_PROVIDERS = "lra.http-client.providers";
+    public static final String BEARER_TOKEN_PROPERTY = "lra.jwt.token";
+
+    public static final String ROLE_ADMIN = "lra-admin";
+    public static final String ROLE_PARTICIPANT = "lra-participant";
+    public static final String ROLE_NESTED = "lra-nested";
+
+    public static final String SERVICE_TOKEN_LOCATION = "lra.security.service-token.location";
+    public static final String SERVICE_TOKEN_REFRESH_SECONDS = "lra.security.service-token.refresh-seconds";
 
     /**
      * Number of milliseconds for the coordinator to hold a lock for enlisting participants. Defaults to 500.

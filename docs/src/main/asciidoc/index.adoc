@@ -12,5 +12,6 @@ include::jaxrs.adoc[]
 include::non-jaxrs.adoc[]
 include::examples.adoc[]
 include::integration.adoc[]
+include::security.adoc[]
 
 :leveloffset: -1

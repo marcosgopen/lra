@@ -1,0 +1,456 @@
+
+= Security
+
+The LRA project supports optional JWT-based security for three concerns:
+
+* <<inbound-authentication,Inbound authentication>> -- validating Bearer tokens on coordinator API endpoints
+  (delegated to the container's MicroProfile JWT implementation)
+* <<outbound-token-propagation,Outbound token propagation>> -- forwarding credentials when the coordinator calls
+  participant callbacks, or when participants call the coordinator
+* <<recovery-thread-service-token,Recovery thread authentication>> -- using a pre-provisioned service token
+  when no inbound request context is available
+
+[[inbound-authentication]]
+== Inbound Authentication
+
+Inbound JWT authentication is *not* implemented by the coordinator itself.
+It is the responsibility of the deployment container:
+
+* *WildFly*: configure via the Elytron subsystem and the `microprofile-jwt-smallrye` extension.
+  The LRA coordinator subsystem supports a `security-domain` attribute that wires
+  `BEARER_TOKEN` authentication on the internal coordinator deployment.
+* *Quarkus*: configure via `quarkus.smallrye-jwt.*` properties in `application.properties`.
+
+The container validates the JWT signature and claims, populates `SecurityContext`,
+and makes `JsonWebToken` available via CDI.
+
+=== WildFly Configuration
+
+Enable bearer token authentication by setting `security-domain` in the LRA coordinator subsystem:
+
+[source,xml]
+----
+<subsystem xmlns="urn:jboss:domain:microprofile-lra-coordinator:2.0"
+           security-domain="lra-bearer-security-domain"/>
+----
+
+The referenced security domain must be an Elytron `http-authentication-factory` configured for
+`BEARER_TOKEN` authentication against the `microprofile-jwt-smallrye` mechanism.
+Refer to the
+https://docs.wildfly.org/32/Admin_Guide.html#MicroProfile_JWT_SmallRye[MicroProfile JWT SmallRye subsystem documentation]
+for the complete Elytron wiring.
+
+=== Quarkus Configuration
+
+In `application.properties` (or `application.yaml`), specify the issuer and public key location:
+
+[source,properties]
+----
+mp.jwt.verify.publickey.location=META-INF/coordinator-public-key.pem
+mp.jwt.verify.issuer=https://my-idp/realms/my-realm
+----
+
+[[outbound-token-propagation]]
+== Outbound Token Propagation
+
+=== Zero-Config: `@PropagateToken`
+
+The simplest way to propagate JWT tokens is the `@PropagateToken` annotation on
+participant resource methods.
+No `lra.http-client.providers` configuration is needed:
+
+[source,java]
+----
+@LRA(value = LRA.Type.REQUIRED)
+@PropagateToken
+@GET
+public Response startWork() { ... }
+----
+
+When a request with a Bearer token hits an `@PropagateToken` method, the LRA runtime:
+
+. Captures the token from the `Authorization` header
+. Validates that it has a plausible JWT structure (three dot-separated segments)
+. Stores it in a thread-local for the duration of the request
+. Automatically registers the token filter on outbound coordinator calls
+. Clears the thread-local after the response
+
+`@PropagateToken` can be placed on individual methods or on the class (applies to all methods).
+
+=== Explicit: `lra.http-client.providers`
+
+Two filters are provided for explicit registration:
+
+[cols="1,1,2",options="header"]
+|===
+|Filter |Module |Use Case
+
+|`io.narayana.lra.client.JwtTokenClientRequestFilter`
+|`lra-client`
+|Participants calling the coordinator
+
+|`io.narayana.lra.coordinator.security.JwtTokenCallbackRequestFilter`
+|`lra-coordinator-jar`
+|Coordinator calling participant callbacks
+|===
+
+==== Participant Configuration
+
+[source,properties]
+----
+lra.http-client.providers=io.narayana.lra.client.JwtTokenClientRequestFilter
+----
+
+==== Coordinator Configuration
+
+[source,properties]
+----
+lra.http-client.providers=io.narayana.lra.coordinator.security.JwtTokenCallbackRequestFilter
+----
+
+The configuration key (`lra.http-client.providers`) is shared: `RestClientConfig` in the
+`lra-client` module reads it for the `NarayanaLRAClient`, and `JwtTokenContext` in the
+coordinator reads it for direct HTTP calls.
+
+=== Token Resolution
+
+Both filters delegate to `BearerTokenResolver`, which resolves the token from available
+sources in the following order:
+
+[cols="^1,2,2,2",options="header"]
+|===
+|Priority |Source |When Available |Used by
+
+|1
+|`@PropagateToken` thread-local
+|`@PropagateToken` on resource method
+|Client filter only
+
+|2
+|`JsonWebToken` via CDI
+|Request thread with MicroProfile JWT
+|Both filters
+
+|3
+|Client property `lra.jwt.token`
+|Set by `JwtTokenContext.newClient()`
+|Both filters
+|===
+
+The first non-null source wins.
+The filter adds `Authorization: Bearer <token>` to the outbound request.
+
+=== Structural Validation
+
+When `@PropagateToken` captures a token, the LRA runtime validates that it has the
+three dot-separated segments expected of a JWS compact serialization
+(`header.payload.signature`).
+Tokens that fail this check are not propagated and a warning is logged.
+This catches misconfigured `Authorization` headers early without
+performing full JWT signature or claims validation (that remains the receiver's responsibility).
+
+[[recovery-thread-service-token]]
+== Recovery Thread and Service Token
+
+The Narayana recovery thread (`LRARecoveryModule.periodicWorkSecondPass()`) retries
+failed participant callbacks periodically.
+This thread runs outside of any CDI request scope, so `JsonWebToken` is not injectable.
+Without additional configuration, outbound calls from the recovery thread lack credentials
+and will be rejected by auth-protected participants.
+
+=== Symptom
+
+LRAs remain stuck in `Closing` or `Cancelling` state indefinitely.
+The coordinator log shows repeated retry attempts, while participant logs show HTTP 401 responses.
+
+=== Solution: Service Token
+
+The coordinator can read a pre-provisioned JWT from a file, classpath resource, or HTTP
+endpoint.
+When `JsonWebToken` is not available and a service token location is configured,
+`JwtTokenContext.newClient()` reads the token from that location and attaches it to
+outbound recovery requests.
+
+[source,properties]
+----
+lra.security.service-token.location=/var/run/secrets/lra/token
+lra.security.service-token.refresh-seconds=300
+----
+
+Supported location schemes:
+
+[cols="2,3,3",options="header"]
+|===
+|Scheme |Example |Use Case
+
+|Plain path
+|`/var/run/secrets/lra/token`
+|Kubernetes projected volumes or host filesystem
+
+|`file://`
+|`file:///opt/tokens/service.jwt`
+|Filesystem with explicit scheme
+
+|`classpath://`
+|`classpath://META-INF/service-token`
+|Bundled static token (development / testing)
+
+|`http://` or `https://`
+|`https://vault.example.com/v1/secret/lra-token`
+|Token vending service (5 s connect/read timeout, 64 KB limit)
+|===
+
+The token is cached for `lra.security.service-token.refresh-seconds` (default 300) and
+then re-read from the source.
+This supports external rotation: a sidecar, init container, or Vault Agent
+writes a fresh token to the file before the old one expires, and the coordinator picks
+it up on the next refresh cycle.
+
+=== Token Format and Issuance
+
+The service token is a standard MicroProfile JWT -- an RS256-signed JSON Web Token with
+at minimum the following claims:
+
+[cols="1,2",options="header"]
+|===
+|Claim |Description
+
+|`iss`
+|Issuer URI -- must match `mp.jwt.verify.issuer` on each participant
+
+|`sub`
+|Subject -- the coordinator's service identity (e.g. `lra-coordinator`)
+
+|`upn`
+|User principal name -- usually the same value as `sub`
+
+|`groups`
+|Array of role names -- must satisfy `@RolesAllowed` on participant callbacks if used
+
+|`exp`
+|Expiry -- set far enough in the future to span the token refresh interval
+|===
+
+[IMPORTANT]
+====
+The participants must be configured to trust the coordinator's service identity.
+The public key used to verify the token on the participant side must correspond to the
+private key used to sign the service token.
+The issuer (`iss`) claim must match the issuer configured for JWT verification on each participant.
+====
+
+The coordinator does *not* sign tokens itself.
+You are responsible for issuing and periodically rotating the service token using your
+identity infrastructure.
+Common approaches are described in the following subsections.
+
+==== Using an Identity Provider (Recommended)
+
+Identity providers such as Keycloak, HashiCorp Vault, or cloud IAM services can issue
+service tokens with configurable expiry and automatic rotation.
+
+.Keycloak example
+. Create a client (e.g., `lra-coordinator`) with client credentials grant.
+. Retrieve a token via the client credentials flow:
++
+[source,shell]
+----
+curl -s -X POST https://keycloak.example.com/realms/my-realm/protocol/openid-connect/token \
+  -d "grant_type=client_credentials" \
+  -d "client_id=lra-coordinator" \
+  -d "client_secret=<secret>" \
+  | jq -r .access_token > /var/run/secrets/lra/token
+----
+. Configure each participant with the Keycloak realm's public key and issuer URI:
++
+[source,properties]
+----
+mp.jwt.verify.publickey.location=https://keycloak.example.com/realms/my-realm/protocol/openid-connect/certs
+mp.jwt.verify.issuer=https://keycloak.example.com/realms/my-realm
+----
+
+A Kubernetes `CronJob` or a sidecar (e.g., `oauth2-proxy`, Vault Agent) can refresh
+the token file before it expires.
+
+==== Kubernetes Projected Volume (Short-Lived Tokens)
+
+When running in Kubernetes, use a projected service account token with an explicit audience:
+
+[source,yaml]
+----
+volumes:
+  - name: lra-token
+    projected:
+      sources:
+        - serviceAccountToken:
+            audience: lra-participants
+            expirationSeconds: 3600
+            path: token
+----
+
+[source,yaml]
+----
+volumeMounts:
+  - name: lra-token
+    mountPath: /var/run/secrets/lra
+    readOnly: true
+----
+
+[source,properties]
+----
+lra.security.service-token.location=/var/run/secrets/lra/token
+lra.security.service-token.refresh-seconds=600
+----
+
+Each participant must accept the token by trusting the Kubernetes API server public key
+and the matching audience.
+Configure each participant's MicroProfile JWT to use the cluster's OIDC discovery endpoint:
+
+[source,properties]
+----
+mp.jwt.verify.publickey.location=https://kubernetes.default.svc/.well-known/openid-configuration
+mp.jwt.verify.issuer=https://kubernetes.default.svc
+----
+
+Kubernetes rotates projected tokens automatically before they expire, so no sidecar is needed.
+
+==== Generating a Static Token for Development
+
+For local development and testing you can generate a self-signed token with a tool such as
+`jose` (the https://github.com/go-jose/go-jose[go-jose] CLI) or a short Java program.
+The following illustrates the required structure -- *do not use a static token in production*:
+
+[source,shell]
+----
+# 1. Generate RSA key pair
+openssl genrsa -out coordinator-private.pem 2048
+openssl rsa -in coordinator-private.pem -pubout -out coordinator-public.pem
+
+# 2. Build header + payload
+HEADER=$(echo -n '{"alg":"RS256","typ":"JWT"}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
+PAYLOAD=$(echo -n '{
+  "iss":"lra-dev-issuer",
+  "sub":"lra-coordinator",
+  "upn":"lra-coordinator",
+  "groups":["lra-system"],
+  "exp":9999999999
+}' | base64 -w0 | tr '+/' '-_' | tr -d '=')
+
+# 3. Sign and write the token
+echo -n "${HEADER}.${PAYLOAD}" \
+  | openssl dgst -sha256 -sign coordinator-private.pem \
+  | base64 -w0 | tr '+/' '-_' | tr -d '=' \
+  | read SIG; echo "${HEADER}.${PAYLOAD}.${SIG}" > /tmp/service-token
+----
+
+Configure each participant with `coordinator-public.pem` and the matching issuer:
+
+[source,properties]
+----
+mp.jwt.verify.publickey.location=META-INF/coordinator-public.pem
+mp.jwt.verify.issuer=lra-dev-issuer
+----
+
+[WARNING]
+====
+A static token with a far-future expiry cannot be revoked.
+Use this approach only in air-gapped development environments and never commit the
+private key or the token to source control.
+====
+
+=== Participant Trust Model
+
+When a service token is used, the coordinator authenticates to participants using its
+own service identity (not the original caller's identity).
+Participants must therefore trust the coordinator's service account to invoke
+compensate, complete, status, forget, and afterLRA callbacks on behalf of any caller.
+
+Design participant `@RolesAllowed` constraints accordingly:
+
+[source,java]
+----
+@Path("/order")
+public class OrderParticipant {
+
+    @PUT
+    @Path("/compensate")
+    @RolesAllowed({"lra-system", "user"})   // accepts both coordinator and user tokens
+    public Response compensate(@HeaderParam(LRA_HTTP_CONTEXT_HEADER) URI lraId) { ... }
+}
+----
+
+== Logging
+
+Token resolution is logged at different levels to aid troubleshooting:
+
+[cols="1,3,3",options="header"]
+|===
+|Level |Message |Meaning
+
+|`TRACE`
+|"JWT token resolved from CDI JsonWebToken"
+|Token found via CDI lookup
+
+|`DEBUG`
+|"CDI not available for JWT resolution: ..."
+|CDI lookup failed (expected on recovery threads)
+
+|`INFO`
+|"Service token provider configured: location=..."
+|`ServiceTokenProvider` initialized at startup
+
+|`WARN`
+|"@PropagateToken: Authorization header does not contain a valid JWT structure"
+|Bearer token failed structural validation
+
+|`WARN`
+|"Failed to read service token from ..."
+|Service token file or HTTP endpoint could not be read
+|===
+
+== Testing
+
+JWT integration tests are in `test/security/` and run against WildFly via Arquillian
+(requires the `-Parq` Maven profile).
+
+[source,shell]
+----
+mvn verify -pl test/security -Parq
+----
+
+The tests verify:
+
+* *CDI injection*: `JsonWebToken` is resolvable and returns the raw token when a
+  valid Bearer token is provided
+* *Token validation*: tokens signed with the correct key are accepted; tokens with
+  a wrong issuer are rejected with HTTP 401
+
+Additional unit tests in `client/` verify:
+
+* *`@PropagateToken` flow*: annotation detection, token capture, structural validation,
+  filter propagation, and auto-registration via `RestClientConfig`
+* *Filter resolution order*: thread-local precedence over CDI and client property
+* *Structural JWT validation*: three-segment check accepts valid JWTs, rejects
+  malformed, opaque, and multi-segment tokens
+
+RSA key pairs are generated programmatically at test startup -- no PEM files are stored in the repository.
+
+== Configuration Reference
+
+[cols="3,1,3",options="header"]
+|===
+|Property |Default |Description
+
+|`lra.http-client.providers`
+|--
+|Comma-separated list of JAX-RS provider class names to register on outbound HTTP clients
+
+|`lra.security.service-token.location`
+|--
+|Location of the pre-provisioned service token used by the recovery thread
+(plain path, `file://`, `classpath://`, `http://`, or `https://`)
+
+|`lra.security.service-token.refresh-seconds`
+|`300`
+|How often the service token is re-read from its source (in seconds)
+|===

@@ -6,9 +6,12 @@
 package io.narayana.lra.coordinator.infinispan;
 
 import com.arjuna.ats.arjuna.common.ObjectStoreEnvironmentBean;
+import com.arjuna.ats.arjuna.common.Uid;
 import com.arjuna.common.internal.util.propertyservice.BeanPopulator;
 import io.narayana.lra.logging.LRALogger;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
 import org.infinispan.Cache;
 import org.infinispan.configuration.cache.CacheMode;
 import org.infinispan.configuration.cache.ConfigurationBuilder;
@@ -44,14 +47,7 @@ public class HAObjectStoreConfiguration {
     private static final String INFINISPAN_SLOTS = "com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanSlots";
     private static final String SLOT_STORE_ENV_BEAN = "com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreEnvironmentBean";
     private static final String INFINISPAN_STORE_ENV_BEAN = "com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanStoreEnvironmentBean";
-
-    // ClusterMemberId key generator — produces per-node cache keys with format:
-    // {groupId}:nodeId:uid:slotIndex
-    // This enables multi-node HA: each node writes to its own keys, but
-    // cache.keySet() returns all keys from all nodes (replicated cache).
-    // On recovery, a fresh SlotStore calls load(cache.keySet()) to build
-    // a complete index across all nodes.
-    private static final String CLUSTER_MEMBER_ID = "com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.ClusterMemberId";
+    private static final String INFINISPAN_SLOT_KEY_GENERATOR = "com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanSlotKeyGenerator";
 
     static final String LRA_OBJECTSTORE_CACHE_NAME = "lra-objectstore";
 
@@ -130,7 +126,7 @@ public class HAObjectStoreConfiguration {
             Class.forName(INFINISPAN_SLOTS);
             Class.forName(SLOT_STORE_ENV_BEAN);
             Class.forName(INFINISPAN_STORE_ENV_BEAN);
-            Class.forName(CLUSTER_MEMBER_ID);
+            Class.forName(INFINISPAN_SLOT_KEY_GENERATOR);
             return true;
         } catch (ClassNotFoundException e) {
             return false;
@@ -204,8 +200,8 @@ public class HAObjectStoreConfiguration {
         Method setCache = ispnEnvClass.getMethod("setCache", Cache.class);
         setCache.invoke(ispnEnvBean, cache);
 
-        // Set node address for ClusterMemberId key generation.
-        // Each node generates unique cache keys: {groupId}:nodeId:uid:slotIndex
+        // Set node address for key generation.
+        // Each node generates unique cache keys: {groupId};nodeId;uid;slotIndex
         // This enables multi-node HA: cache.keySet() returns all keys from all
         // nodes, so a fresh SlotStore can rebuild a complete index for recovery.
         String nodeId = System.getProperty("lra.coordinator.node.id", getHostname());
@@ -217,12 +213,61 @@ public class HAObjectStoreConfiguration {
         Method setGroupName = ispnEnvClass.getMethod("setGroupName", String.class);
         setGroupName.invoke(ispnEnvBean, groupName);
 
-        // Set key generator to ClusterMemberId
-        Method setKeyGenClass = ispnEnvClass.getMethod("setSlotKeyGeneratorClassName", String.class);
-        setKeyGenClass.invoke(ispnEnvBean, CLUSTER_MEMBER_ID);
+        // Create and set key generator via Proxy to avoid compile-time dependency
+        // on InfinispanSlotKeyGenerator (from Narayana PR #2537).
+        // Generates keys in the format: {groupId};nodeId;uid;slotIndex
+        Object keyGenerator = createClusterKeyGenerator(nodeId, groupName);
+        Class<?> keyGenInterface = Class.forName(INFINISPAN_SLOT_KEY_GENERATOR);
+        Method setKeyGen = ispnEnvClass.getMethod("setSlotKeyGenerator", keyGenInterface);
+        setKeyGen.invoke(ispnEnvBean, keyGenerator);
 
-        LRALogger.logger.debugf("InfinispanSlots configured: cache=%s, nodeId=%s, groupName=%s, keyGenerator=%s",
-                LRA_OBJECTSTORE_CACHE_NAME, nodeId, groupName, CLUSTER_MEMBER_ID);
+        LRALogger.logger.debugf("InfinispanSlots configured: cache=%s, nodeId=%s, groupName=%s",
+                LRA_OBJECTSTORE_CACHE_NAME, nodeId, groupName);
+    }
+
+    /**
+     * Creates an InfinispanSlotKeyGenerator via Proxy that generates per-node
+     * cache keys in the format: {groupId};nodeId;uid;slotIndex
+     *
+     * Uses java.lang.reflect.Proxy to avoid a compile-time dependency on
+     * InfinispanSlotKeyGenerator (from Narayana PR #2537). The proxy
+     * implements the same key format as ClusterMemberId from narayana tests.
+     */
+    private static Object createClusterKeyGenerator(String defaultNodeId, String defaultGroupName) throws Exception {
+        Class<?> keyGenInterface = Class.forName(INFINISPAN_SLOT_KEY_GENERATOR);
+
+        final String[] groupId = { defaultGroupName };
+        final String[] nodeId = { defaultNodeId };
+        final Uid[] uid = { new Uid() };
+
+        return Proxy.newProxyInstance(
+                keyGenInterface.getClassLoader(),
+                new Class<?>[] { keyGenInterface },
+                (proxy, method, args) -> {
+                    switch (method.getName()) {
+                        case "generateUniqueKey":
+                            int index = (int) args[0];
+                            return String.format("{%s};%s;%s;%d",
+                                    groupId[0], nodeId[0], uid[0].stringForm(), index)
+                                    .getBytes(StandardCharsets.UTF_8);
+                        case "init":
+                            Object config = args[0];
+                            Method getGroupName = config.getClass().getMethod("getGroupName");
+                            String gn = (String) getGroupName.invoke(config);
+                            if (gn != null && !gn.isEmpty()) {
+                                groupId[0] = gn;
+                            }
+                            Method getNodeAddress = config.getClass().getMethod("getNodeAddress");
+                            String na = (String) getNodeAddress.invoke(config);
+                            if (na != null && !na.isEmpty()) {
+                                nodeId[0] = na;
+                            }
+                            uid[0] = new Uid();
+                            return null;
+                        default:
+                            return null;
+                    }
+                });
     }
 
     private static String getHostname() {

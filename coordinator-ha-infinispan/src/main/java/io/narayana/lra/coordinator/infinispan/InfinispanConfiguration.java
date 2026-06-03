@@ -23,7 +23,7 @@ import org.infinispan.manager.EmbeddedCacheManager;
  *
  * Provides the EmbeddedCacheManager used by:
  * - InfinispanClusterCoordinator (JGroups-based leader election)
- * - InfinispanSlots (BackingSlots implementation for ObjectStore, via PR #2537)
+ * - InfinispanSlots (BackingSlots implementation for ObjectStore)
  *
  * LRA state persistence flows through Narayana's standard ObjectStore path
  * (SlotStoreAdaptor → SlotStore → InfinispanSlots → Infinispan cache).

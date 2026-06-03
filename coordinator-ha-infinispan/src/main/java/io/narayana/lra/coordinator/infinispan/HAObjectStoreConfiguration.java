@@ -7,10 +7,13 @@ package io.narayana.lra.coordinator.infinispan;
 
 import com.arjuna.ats.arjuna.common.ObjectStoreEnvironmentBean;
 import com.arjuna.ats.arjuna.common.Uid;
+import com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreAdaptor;
+import com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreEnvironmentBean;
+import com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanSlotKeyGenerator;
+import com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanSlots;
+import com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanStoreEnvironmentBean;
 import com.arjuna.common.internal.util.propertyservice.BeanPopulator;
 import io.narayana.lra.logging.LRALogger;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import org.infinispan.Cache;
 import org.infinispan.configuration.cache.CacheMode;
@@ -30,24 +33,8 @@ import org.infinispan.manager.EmbeddedCacheManager;
  *         → InfinispanSlots.write()
  *           → cache.put() (replicated to all nodes)
  * </pre>
- *
- * <p>
- * <b>Dependency:</b> This requires Narayana PR #2537 (InfinispanSlots) to be
- * merged into Narayana core. Until then, the configuration will detect that the
- * required classes are not on the classpath and fall back to the default
- * filesystem-based ObjectStore with a warning message.
- * </p>
- *
- * @see <a href="https://github.com/jbosstm/narayana/pull/2537">Narayana PR #2537</a>
  */
 public class HAObjectStoreConfiguration {
-
-    // Class names from Narayana core (ArjunaCore/arjuna module)
-    private static final String SLOT_STORE_ADAPTOR = "com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreAdaptor";
-    private static final String INFINISPAN_SLOTS = "com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanSlots";
-    private static final String SLOT_STORE_ENV_BEAN = "com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreEnvironmentBean";
-    private static final String INFINISPAN_STORE_ENV_BEAN = "com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanStoreEnvironmentBean";
-    private static final String INFINISPAN_SLOT_KEY_GENERATOR = "com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanSlotKeyGenerator";
 
     static final String LRA_OBJECTSTORE_CACHE_NAME = "lra-objectstore";
 
@@ -57,26 +44,19 @@ public class HAObjectStoreConfiguration {
     }
 
     /**
-     * Configures the Narayana ObjectStore to use InfinispanSlots if available.
+     * Configures the Narayana ObjectStore to use InfinispanSlots.
      *
      * <p>
      * This method:
      * </p>
      * <ol>
-     * <li>Checks that InfinispanSlots is on the classpath (from Narayana PR #2537)</li>
      * <li>Creates a replicated Infinispan cache for LRA state storage</li>
      * <li>Configures SlotStoreAdaptor as the ObjectStore implementation</li>
      * <li>Wires the Infinispan cache into InfinispanStoreEnvironmentBean</li>
      * </ol>
      *
-     * <p>
-     * If InfinispanSlots is not available, logs a warning and leaves the
-     * ObjectStore at its default (filesystem). The coordinator still works
-     * but state is not replicated across the cluster.
-     * </p>
-     *
      * @param cacheManager the Infinispan EmbeddedCacheManager (must be initialized)
-     * @return true if InfinispanSlots was successfully configured, false if falling back to default
+     * @return true if InfinispanSlots was successfully configured, false on failure
      */
     public static boolean configure(EmbeddedCacheManager cacheManager) {
         if (cacheManager == null) {
@@ -84,25 +64,11 @@ public class HAObjectStoreConfiguration {
             return false;
         }
 
-        // Check if InfinispanSlots is available on the classpath
-        if (!isInfinispanSlotsAvailable()) {
-            LRALogger.logger.warn(
-                    "InfinispanSlots (Narayana PR #2537) is not available on the classpath. "
-                            + "The LRA coordinator will use the default filesystem-based ObjectStore. "
-                            + "LRA state will NOT be replicated across the cluster. "
-                            + "To enable HA state replication, upgrade to a Narayana version that includes "
-                            + "the InfinispanSlots BackingSlots implementation.");
-            return false;
-        }
-
         try {
-            // Create the replicated cache for LRA ObjectStore data
             Cache<byte[], byte[]> cache = getOrCreateCache(cacheManager);
 
-            // Configure Narayana's ObjectStore to use SlotStoreAdaptor
             configureObjectStoreBean();
 
-            // Configure SlotStore to use InfinispanSlots with our cache
             configureSlotStoreBean(cache);
 
             LRALogger.logger.info("HA ObjectStore configured: SlotStoreAdaptor → InfinispanSlots → "
@@ -113,22 +79,6 @@ public class HAObjectStoreConfiguration {
             LRALogger.logger.errorf(e, "Failed to configure HA ObjectStore. "
                     + "Falling back to default filesystem-based ObjectStore. "
                     + "LRA state will NOT be replicated across the cluster.");
-            return false;
-        }
-    }
-
-    /**
-     * Checks if the InfinispanSlots class is available on the classpath.
-     */
-    private static boolean isInfinispanSlotsAvailable() {
-        try {
-            Class.forName(SLOT_STORE_ADAPTOR);
-            Class.forName(INFINISPAN_SLOTS);
-            Class.forName(SLOT_STORE_ENV_BEAN);
-            Class.forName(INFINISPAN_STORE_ENV_BEAN);
-            Class.forName(INFINISPAN_SLOT_KEY_GENERATOR);
-            return true;
-        } catch (ClassNotFoundException e) {
             return false;
         }
     }
@@ -159,115 +109,39 @@ public class HAObjectStoreConfiguration {
      */
     private static void configureObjectStoreBean() {
         ObjectStoreEnvironmentBean defaultBean = BeanPopulator.getDefaultInstance(ObjectStoreEnvironmentBean.class);
-        defaultBean.setObjectStoreType(SLOT_STORE_ADAPTOR);
+        defaultBean.setObjectStoreType(SlotStoreAdaptor.class.getName());
 
-        LRALogger.logger.debugf("ObjectStore type set to: %s", SLOT_STORE_ADAPTOR);
+        LRALogger.logger.debugf("ObjectStore type set to: %s", SlotStoreAdaptor.class.getName());
     }
 
     /**
      * Configures the SlotStoreEnvironmentBean and InfinispanStoreEnvironmentBean
      * to use InfinispanSlots with the provided cache.
-     *
-     * <p>
-     * Uses reflection to avoid compile-time dependency on classes from
-     * Narayana PR #2537 which may not be available yet.
-     * </p>
      */
-    private static void configureSlotStoreBean(Cache<byte[], byte[]> cache) throws Exception {
-        // Configure SlotStoreEnvironmentBean
-        Class<?> slotEnvClass = Class.forName(SLOT_STORE_ENV_BEAN);
-        Object slotEnvBean = BeanPopulator.getDefaultInstance(
-                slotEnvClass.asSubclass(Object.class));
+    private static void configureSlotStoreBean(Cache<byte[], byte[]> cache) {
+        SlotStoreEnvironmentBean slotEnvBean = BeanPopulator.getDefaultInstance(SlotStoreEnvironmentBean.class);
 
-        // Set number of slots (max concurrent LRAs)
         int numberOfSlots = getNumberOfSlots();
-        Method setNumberOfSlots = slotEnvClass.getMethod("setNumberOfSlots", int.class);
-        setNumberOfSlots.invoke(slotEnvBean, numberOfSlots);
-
-        // Set the BackingSlots class name
-        Method setBackingSlotsClassName = slotEnvClass.getMethod("setBackingSlotsClassName", String.class);
-        setBackingSlotsClassName.invoke(slotEnvBean, INFINISPAN_SLOTS);
+        slotEnvBean.setNumberOfSlots(numberOfSlots);
+        slotEnvBean.setBackingSlotsClassName(InfinispanSlots.class.getName());
 
         LRALogger.logger.debugf("SlotStore configured: backingSlots=%s, numberOfSlots=%d",
-                INFINISPAN_SLOTS, numberOfSlots);
+                InfinispanSlots.class.getName(), numberOfSlots);
 
-        // Configure InfinispanStoreEnvironmentBean (extends SlotStoreEnvironmentBean)
-        Class<?> ispnEnvClass = Class.forName(INFINISPAN_STORE_ENV_BEAN);
-        Object ispnEnvBean = BeanPopulator.getDefaultInstance(
-                ispnEnvClass.asSubclass(Object.class));
+        InfinispanStoreEnvironmentBean ispnEnvBean = BeanPopulator.getDefaultInstance(InfinispanStoreEnvironmentBean.class);
 
-        // Set the cache
-        Method setCache = ispnEnvClass.getMethod("setCache", Cache.class);
-        setCache.invoke(ispnEnvBean, cache);
+        ispnEnvBean.setCache(cache);
 
-        // Set node address for key generation.
-        // Each node generates unique cache keys: {groupId};nodeId;uid;slotIndex
-        // This enables multi-node HA: cache.keySet() returns all keys from all
-        // nodes, so a fresh SlotStore can rebuild a complete index for recovery.
         String nodeId = System.getProperty("lra.coordinator.node.id", getHostname());
-        Method setNodeAddress = ispnEnvClass.getMethod("setNodeAddress", String.class);
-        setNodeAddress.invoke(ispnEnvBean, nodeId);
+        ispnEnvBean.setNodeAddress(nodeId);
 
-        // Set group name for Infinispan key grouping/affinity
         String groupName = System.getProperty("lra.coordinator.cluster.name", "lra");
-        Method setGroupName = ispnEnvClass.getMethod("setGroupName", String.class);
-        setGroupName.invoke(ispnEnvBean, groupName);
+        ispnEnvBean.setGroupName(groupName);
 
-        // Create and set key generator via Proxy to avoid compile-time dependency
-        // on InfinispanSlotKeyGenerator (from Narayana PR #2537).
-        // Generates keys in the format: {groupId};nodeId;uid;slotIndex
-        Object keyGenerator = createClusterKeyGenerator(nodeId, groupName);
-        Class<?> keyGenInterface = Class.forName(INFINISPAN_SLOT_KEY_GENERATOR);
-        Method setKeyGen = ispnEnvClass.getMethod("setSlotKeyGenerator", keyGenInterface);
-        setKeyGen.invoke(ispnEnvBean, keyGenerator);
+        ispnEnvBean.setSlotKeyGenerator(new LRASlotKeyGenerator(nodeId, groupName));
 
         LRALogger.logger.debugf("InfinispanSlots configured: cache=%s, nodeId=%s, groupName=%s",
                 LRA_OBJECTSTORE_CACHE_NAME, nodeId, groupName);
-    }
-
-    /**
-     * Creates an InfinispanSlotKeyGenerator via Proxy that generates per-node
-     * cache keys in the format: {groupId};nodeId;uid;slotIndex
-     *
-     * Uses java.lang.reflect.Proxy to avoid a compile-time dependency on
-     * InfinispanSlotKeyGenerator (from Narayana PR #2537). The proxy
-     * implements the same key format as ClusterMemberId from narayana tests.
-     */
-    private static Object createClusterKeyGenerator(String defaultNodeId, String defaultGroupName) throws Exception {
-        Class<?> keyGenInterface = Class.forName(INFINISPAN_SLOT_KEY_GENERATOR);
-
-        final String[] groupId = { defaultGroupName };
-        final String[] nodeId = { defaultNodeId };
-        final Uid[] uid = { new Uid() };
-
-        return Proxy.newProxyInstance(
-                keyGenInterface.getClassLoader(),
-                new Class<?>[] { keyGenInterface },
-                (proxy, method, args) -> {
-                    switch (method.getName()) {
-                        case "generateUniqueKey":
-                            int index = (int) args[0];
-                            return String.format("{%s};%s;%s;%d",
-                                    groupId[0], nodeId[0], uid[0].stringForm(), index)
-                                    .getBytes(StandardCharsets.UTF_8);
-                        case "init":
-                            Object config = args[0];
-                            Method getGroupName = config.getClass().getMethod("getGroupName");
-                            String gn = (String) getGroupName.invoke(config);
-                            if (gn != null && !gn.isEmpty()) {
-                                groupId[0] = gn;
-                            }
-                            Method getNodeAddress = config.getClass().getMethod("getNodeAddress");
-                            String na = (String) getNodeAddress.invoke(config);
-                            if (na != null && !na.isEmpty()) {
-                                nodeId[0] = na;
-                            }
-                            uid[0] = new Uid();
-                            return null;
-                        default:
-                            return null;
-                    }
-                });
     }
 
     private static String getHostname() {
@@ -304,6 +178,43 @@ public class HAObjectStoreConfiguration {
         } catch (IllegalArgumentException e) {
             LRALogger.logger.warnf("Invalid cache mode '%s', using REPL_SYNC", mode);
             return CacheMode.REPL_SYNC;
+        }
+    }
+
+    /**
+     * Generates per-node cache keys in the format: {groupId};nodeId;uid;slotIndex.
+     * This enables multi-node HA: each node produces unique keys, and
+     * cache.keySet() returns all keys from all nodes for recovery scanning.
+     */
+    private static class LRASlotKeyGenerator implements InfinispanSlotKeyGenerator {
+
+        private String groupId;
+        private String nodeId;
+        private Uid uid;
+
+        LRASlotKeyGenerator(String nodeId, String groupId) {
+            this.nodeId = nodeId;
+            this.groupId = groupId;
+            this.uid = new Uid();
+        }
+
+        @Override
+        public byte[] generateUniqueKey(int index) {
+            return String.format("{%s};%s;%s;%d", groupId, nodeId, uid.stringForm(), index)
+                    .getBytes(StandardCharsets.UTF_8);
+        }
+
+        @Override
+        public void init(InfinispanStoreEnvironmentBean config) {
+            String gn = config.getGroupName();
+            if (gn != null && !gn.isEmpty()) {
+                this.groupId = gn;
+            }
+            String na = config.getNodeAddress();
+            if (na != null && !na.isEmpty()) {
+                this.nodeId = na;
+            }
+            this.uid = new Uid();
         }
     }
 }

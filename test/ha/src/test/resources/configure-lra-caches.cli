@@ -1,25 +1,66 @@
-## WildFly CLI script to configure Infinispan for LRA HA mode.
+## WildFly CLI script to configure JGroups and Infinispan for LRA HA mode.
 ## Run via: jboss-cli.sh --file=configure-lra-caches.cli
 ## The embed-server / stop-embedded-server commands are included so this
 ## script works in offline mode (no running WildFly instance required).
-## Idempotent: skips configuration if the lra cache container already exists.
+## Idempotent: skips each block if the component already exists.
 ##
-## This creates an Infinispan cache container used by:
-## - InfinispanClusterCoordinator (JGroups-based leader election)
-## - InfinispanSlots (BackingSlots ObjectStore backend, when available)
+## Block 1: adds JGroups clustering support to lra-coordinator.xml.
+##   lra-coordinator.xml ships without JGroups; it must be added for HA.
+##   The extension must be loaded sequentially (before stack/channel resources
+##   can be used). Stack and transport are batched together so WildFly can
+##   resolve the transport capability during the composite operation.
+##   Protocols and the channel are added sequentially after the batch.
 ##
-## LRA state persistence flows through Narayana's standard ObjectStore path.
-## When using InfinispanSlots as the BackingSlots implementation (PR #2537),
-## the SlotStore manages its own cache within this container.
+## Block 2: creates the LRA Infinispan cache container used by:
+##   - InfinispanClusterCoordinator (JGroups-based leader election)
+##   - InfinispanConfiguration (JNDI lookup of java:jboss/infinispan/container/lra)
+##
+## The three replicated caches (lra-active, lra-recovering, lra-failed) are
+## declared as resource-env-refs in the coordinator WAR's web.xml; WildFly
+## validates they exist at deploy time, so they must be pre-configured here.
+## The lra-objectstore cache is created programmatically by HAObjectStoreConfiguration
+## and must NOT be listed here.
 
-embed-server --server-config=standalone-ha.xml --std-out=discard
+embed-server --server-config=lra-coordinator.xml --std-out=discard
+
+if (outcome != success) of /extension=org.jboss.as.clustering.jgroups:read-resource
+    /extension=org.jboss.as.clustering.jgroups:add()
+    /interface=private:add(inet-address="${jboss.bind.address.private:127.0.0.1}")
+    /socket-binding-group=standard-sockets/socket-binding=jgroups-mping:add(interface=private, multicast-address="${jboss.default.multicast.address:230.0.0.4}", multicast-port=45700)
+    /socket-binding-group=standard-sockets/socket-binding=jgroups-tcp:add(interface=private, port=7600)
+    /socket-binding-group=standard-sockets/socket-binding=jgroups-tcp-fd:add(interface=private, port=57600)
+    /socket-binding-group=standard-sockets/socket-binding=jgroups-udp:add(interface=private, port=55200, multicast-address="${jboss.default.multicast.address:230.0.0.4}", multicast-port=45688)
+    /socket-binding-group=standard-sockets/socket-binding=jgroups-udp-fd:add(interface=private, port=54200)
+    /subsystem=jgroups:add()
+    batch
+    /subsystem=jgroups/stack=udp:add()
+    /subsystem=jgroups/stack=udp/transport=UDP:add(socket-binding=jgroups-udp)
+    run-batch
+    /subsystem=jgroups/stack=udp/protocol=PING:add()
+    /subsystem=jgroups/stack=udp/protocol=MERGE3:add()
+    /subsystem=jgroups/stack=udp/protocol=FD_ALL3:add()
+    /subsystem=jgroups/stack=udp/protocol=VERIFY_SUSPECT2:add()
+    /subsystem=jgroups/stack=udp/protocol=pbcast.NAKACK2:add()
+    /subsystem=jgroups/stack=udp/protocol=UNICAST3:add()
+    /subsystem=jgroups/stack=udp/protocol=pbcast.STABLE:add()
+    /subsystem=jgroups/stack=udp/protocol=pbcast.GMS:add()
+    /subsystem=jgroups/stack=udp/protocol=UFC:add()
+    /subsystem=jgroups/stack=udp/protocol=MFC:add()
+    /subsystem=jgroups/stack=udp/protocol=FRAG4:add()
+    /subsystem=jgroups/channel=ee:add(stack=udp, cluster=ejb)
+    /subsystem=jgroups:write-attribute(name=default-channel, value=ee)
+end-if
 
 if (outcome != success) of /subsystem=infinispan/cache-container=lra:read-resource
     batch
-    /subsystem=infinispan/cache-container=lra:add(default-cache=lra-objectstore)
+    /subsystem=infinispan/cache-container=lra:add(default-cache=lra-active)
     /subsystem=infinispan/cache-container=lra/transport=jgroups:add()
-    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-objectstore:add()
-    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-objectstore/component=partition-handling:add(when-split=DENY_READ_WRITES)
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-active:add()
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-active/component=partition-handling:add(when-split=DENY_READ_WRITES)
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-recovering:add()
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-recovering/component=partition-handling:add(when-split=DENY_READ_WRITES)
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-failed:add()
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-failed/component=partition-handling:add(when-split=DENY_READ_WRITES)
     run-batch
 end-if
 

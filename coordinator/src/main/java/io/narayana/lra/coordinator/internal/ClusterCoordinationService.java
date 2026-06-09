@@ -5,6 +5,8 @@
 
 package io.narayana.lra.coordinator.internal;
 
+import java.util.Map;
+
 /**
  * Interface for cluster coordination and leader election in HA mode.
  *
@@ -45,6 +47,16 @@ public interface ClusterCoordinationService {
      * @param listener the listener to remove
      */
     void removeCoordinatorChangeListener(CoordinatorChangeListener listener);
+
+    /**
+     * Returns a cluster-wide distributed map for sharing data across nodes.
+     * The map is backed by a replicated Infinispan cache (REPL_SYNC) so writes
+     * on any node are immediately visible on all other nodes.
+     *
+     * @param name the cache name to use as the backing store
+     * @return a distributed Map, or null if not available (e.g. single-node or not initialized)
+     */
+    Map<String, String> getDistributedMap(String name);
 
     /**
      * Listener interface for coordinator status changes.

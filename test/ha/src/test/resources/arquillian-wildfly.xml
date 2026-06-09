@@ -15,7 +15,7 @@
     <container qualifier="wildfly-ha-node1" mode="manual" default="true">
         <configuration>
             <property name="jbossHome">${wildfly.home}</property>
-            <property name="serverConfig">standalone-ha.xml</property>
+            <property name="serverConfig">lra-coordinator.xml</property>
             <property name="javaVmArguments">
                 -Djboss.node.name=node1
                 -Djboss.socket.binding.port-offset=0
@@ -35,7 +35,7 @@
     <container qualifier="wildfly-ha-node2" mode="manual">
         <configuration>
             <property name="jbossHome">${wildfly.home}</property>
-            <property name="serverConfig">standalone-ha.xml</property>
+            <property name="serverConfig">lra-coordinator.xml</property>
             <property name="javaVmArguments">
                 -Djboss.node.name=node2
                 -Djboss.socket.binding.port-offset=100
@@ -55,7 +55,7 @@
     <container qualifier="wildfly-ha-node3" mode="manual">
         <configuration>
             <property name="jbossHome">${wildfly.home}</property>
-            <property name="serverConfig">standalone-ha.xml</property>
+            <property name="serverConfig">lra-coordinator.xml</property>
             <property name="javaVmArguments">
                 -Djboss.node.name=node3
                 -Djboss.socket.binding.port-offset=200

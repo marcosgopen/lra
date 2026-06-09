@@ -14,6 +14,8 @@ import jakarta.inject.Named;
 import javax.naming.InitialContext;
 import javax.naming.NameNotFoundException;
 import javax.naming.NamingException;
+import org.infinispan.configuration.cache.CacheMode;
+import org.infinispan.configuration.cache.ConfigurationBuilder;
 import org.infinispan.configuration.global.GlobalConfigurationBuilder;
 import org.infinispan.manager.DefaultCacheManager;
 import org.infinispan.manager.EmbeddedCacheManager;
@@ -36,6 +38,7 @@ public class InfinispanConfiguration {
     private static final String JNDI_CACHE_CONTAINER = "java:jboss/infinispan/container/lra";
 
     private EmbeddedCacheManager cacheManager;
+    private InfinispanClusterCoordinator coordinator;
     private boolean initialized = false;
     private boolean managedByContainer = false;
 
@@ -146,6 +149,17 @@ public class InfinispanConfiguration {
 
         cacheManager = new DefaultCacheManager(globalConfig.build());
 
+        // Define the lra-active cache used as the distributed LRA registry.
+        // In WildFly mode this cache is pre-configured via the Infinispan subsystem;
+        // in embedded mode we define it programmatically.
+        if (!cacheManager.cacheExists("lra-active")) {
+            ConfigurationBuilder cacheBuilder = new ConfigurationBuilder();
+            cacheBuilder.clustering().cacheMode(CacheMode.REPL_SYNC)
+                    .partitionHandling()
+                    .whenSplit(org.infinispan.partitionhandling.PartitionHandling.ALLOW_READS);
+            cacheManager.defineConfiguration("lra-active", cacheBuilder.build());
+        }
+
         LRALogger.logger.infof("Infinispan initialized in embedded mode for cluster '%s' with node name '%s'",
                 clusterName, getNodeName());
         LRALogger.logger.infof("Infinispan cluster members: %s", cacheManager.getMembers());
@@ -168,8 +182,9 @@ public class InfinispanConfiguration {
 
     /**
      * Produces the cluster coordinator bean.
+     * The returned coordinator is created once and reused for the application lifetime.
      *
-     * @return the cluster coordinator
+     * @return the cluster coordinator, or throws if the cache manager is unavailable
      */
     @Produces
     @ApplicationScoped
@@ -178,10 +193,13 @@ public class InfinispanConfiguration {
             initialize();
         }
         if (cacheManager == null) {
-            return null;
+            throw new IllegalStateException("Infinispan cache manager is not available; "
+                    + "check that the 'lra' cache container is configured in WildFly");
         }
-        InfinispanClusterCoordinator coordinator = new InfinispanClusterCoordinator();
-        coordinator.initialize(cacheManager);
+        if (coordinator == null) {
+            coordinator = new InfinispanClusterCoordinator();
+            coordinator.initialize(cacheManager);
+        }
         return coordinator;
     }
 
@@ -230,6 +248,10 @@ public class InfinispanConfiguration {
      */
     @PreDestroy
     public void shutdown() {
+        if (coordinator != null) {
+            coordinator.shutdown();
+            coordinator = null;
+        }
         if (cacheManager != null && !managedByContainer) {
             LRALogger.logger.info("Stopping Infinispan cache manager");
             cacheManager.stop();

@@ -23,7 +23,7 @@
     <ha.test.timeout>300</ha.test.timeout>
     <!-- HA tests manage their own containers; disable the parent's wildfly-maven-plugin -->
     <skip.wildfly.plugin>true</skip.wildfly.plugin>
-    <wildfly.config>standalone-ha.xml</wildfly.config>
+    <wildfly.config>lra-coordinator.xml</wildfly.config>
   </properties>
 
   <dependencies>

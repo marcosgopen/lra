@@ -114,7 +114,8 @@ public class LRARecoveryModule implements RecoveryModule,
             }
 
             this.haEnabled = true;
-            service.initializeHA(clusterCoordinator);
+            Map<String, String> activeCache = clusterCoordinator.getDistributedMap("lra-active");
+            service.initializeHA(clusterCoordinator, activeCache);
 
             // Register for cluster coordinator change notifications
             if (clusterCoordinator != null && clusterCoordinator.isInitialized()) {

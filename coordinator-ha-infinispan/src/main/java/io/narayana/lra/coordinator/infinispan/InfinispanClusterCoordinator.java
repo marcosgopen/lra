@@ -7,9 +7,8 @@ package io.narayana.lra.coordinator.infinispan;
 
 import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
 import io.narayana.lra.logging.LRALogger;
-import jakarta.annotation.PreDestroy;
-import jakarta.enterprise.context.ApplicationScoped;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -30,7 +29,6 @@ import org.infinispan.remoting.transport.Address;
  * This prevents multiple coordinators from trying to recover the same LRA
  * simultaneously.
  */
-@ApplicationScoped
 @Listener
 public class InfinispanClusterCoordinator implements ClusterCoordinationService {
 
@@ -191,9 +189,26 @@ public class InfinispanClusterCoordinator implements ClusterCoordinationService 
     }
 
     /**
+     * Returns a cluster-wide Map backed by the named Infinispan replicated cache.
+     * Writes on one node are immediately visible on all other nodes (REPL_SYNC).
+     */
+    @Override
+    @SuppressWarnings("unchecked")
+    public Map<String, String> getDistributedMap(String name) {
+        if (cacheManager == null) {
+            return null;
+        }
+        try {
+            return (Map<String, String>) (Map<?, ?>) cacheManager.getCache(name);
+        } catch (Exception e) {
+            LRALogger.logger.warnf(e, "Failed to get distributed map '%s'", name);
+            return null;
+        }
+    }
+
+    /**
      * Shuts down cluster coordination.
      */
-    @PreDestroy
     public void shutdown() {
         scheduler.shutdown();
         if (cacheManager != null) {

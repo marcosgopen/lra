@@ -32,6 +32,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
@@ -49,6 +50,7 @@ public class LRAService {
 
     // HA components (injected by LRARecoveryModule when HA is enabled)
     private ClusterCoordinationService clusterCoordinator;
+    private Map<String, String> lraActiveCache;
     private String nodeId;
     private boolean haEnabled = false;
 
@@ -164,6 +166,31 @@ public class LRAService {
                     .forEach(d -> result.put(d.getLraId(), d));
         }
 
+        // Include active LRAs from other cluster nodes via the distributed registry.
+        // The lra-active cache is REPL_SYNC so writes on one node are immediately
+        // visible on all other nodes.
+        if (haEnabled && lraActiveCache != null && (lraStatus == null || lraStatus == LRAStatus.Active)) {
+            Set<String> localUids = new java.util.HashSet<>();
+            lras.values().forEach(lra -> localUids.add(lra.get_uid().fileStringForm()));
+            recoveringLRAs.values().forEach(lra -> localUids.add(lra.get_uid().fileStringForm()));
+
+            for (Map.Entry<String, String> entry : lraActiveCache.entrySet()) {
+                String uid = entry.getKey();
+                String uriStr = entry.getValue();
+                if (!localUids.contains(uid) && uriStr != null) {
+                    try {
+                        URI remoteUri = URI.create(uriStr);
+                        LRAData remoteData = new LRAData(remoteUri, null, LRAStatus.Active,
+                                true, false, 0, 0, 0);
+                        result.put(remoteUri, remoteData);
+                    } catch (Exception e) {
+                        LRALogger.logger.debugf("Skipping invalid distributed cache entry uid=%s uri=%s: %s",
+                                uid, uriStr, e.getMessage());
+                    }
+                }
+            }
+        }
+
         return new ArrayList<>(result.values());
     }
 
@@ -241,6 +268,13 @@ public class LRAService {
 
         if (lra != null) {
             lraParticipants.remove(lra);
+            if (haEnabled && lraActiveCache != null) {
+                try {
+                    lraActiveCache.remove(lra.get_uid().fileStringForm());
+                } catch (Exception e) {
+                    LRALogger.logger.warnf(e, "Failed to remove LRA %s from distributed cache", lraId);
+                }
+            }
         }
 
         recoveringLRAs.remove(lraId);
@@ -361,8 +395,19 @@ public class LRAService {
                     .build());
         } else {
             addTransaction(lra);
+            registerInDistributedCache(lra);
 
             return lra;
+        }
+    }
+
+    private void registerInDistributedCache(LongRunningAction lra) {
+        if (haEnabled && lraActiveCache != null) {
+            try {
+                lraActiveCache.put(lra.get_uid().fileStringForm(), lra.getId().toString());
+            } catch (Exception e) {
+                LRALogger.logger.warnf(e, "Failed to register LRA %s in distributed cache", lra.getId());
+            }
         }
     }
 
@@ -585,15 +630,18 @@ public class LRAService {
      * Called by LRARecoveryModule when HA is enabled.
      *
      * @param clusterCoordinator the cluster coordinator
+     * @param lraActiveCache distributed map backed by the lra-active Infinispan cache
      */
-    public void initializeHA(ClusterCoordinationService clusterCoordinator) {
+    public void initializeHA(ClusterCoordinationService clusterCoordinator, Map<String, String> lraActiveCache) {
         this.clusterCoordinator = clusterCoordinator;
+        this.lraActiveCache = lraActiveCache;
         this.haEnabled = true;
 
         // Initialize node ID
         initializeNodeId();
 
-        LRALogger.logger.infof("LRAService initialized with HA mode, node ID: %s", nodeId);
+        LRALogger.logger.infof("LRAService initialized with HA mode, node ID: %s, distributed cache: %s",
+                nodeId, lraActiveCache != null ? "available" : "unavailable");
     }
 
     /**

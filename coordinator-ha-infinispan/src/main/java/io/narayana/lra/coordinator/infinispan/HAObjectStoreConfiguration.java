@@ -6,15 +6,12 @@
 package io.narayana.lra.coordinator.infinispan;
 
 import com.arjuna.ats.arjuna.common.ObjectStoreEnvironmentBean;
-import com.arjuna.ats.arjuna.common.Uid;
 import com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreAdaptor;
 import com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreEnvironmentBean;
-import com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanSlotKeyGenerator;
 import com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanSlots;
 import com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanStoreEnvironmentBean;
 import com.arjuna.common.internal.util.propertyservice.BeanPopulator;
 import io.narayana.lra.logging.LRALogger;
-import java.nio.charset.StandardCharsets;
 import org.infinispan.Cache;
 import org.infinispan.configuration.cache.CacheMode;
 import org.infinispan.configuration.cache.ConfigurationBuilder;
@@ -67,16 +64,20 @@ public class HAObjectStoreConfiguration {
         try {
             Cache<byte[], byte[]> cache = getOrCreateCache(cacheManager);
 
-            configureObjectStoreBean();
-
+            // configureObjectStoreBean() is called LAST so that if configureSlotStoreBean()
+            // fails (e.g. InfinispanSlots not available in this Narayana version), the
+            // ObjectStore type is NOT changed and the filesystem store remains functional.
             configureSlotStoreBean(cache);
 
-            LRALogger.logger.info("HA ObjectStore configured: SlotStoreAdaptor → InfinispanSlots → "
+            configureObjectStoreBean();
+
+            LRALogger.logger.info("HA ObjectStore configured: SlotStoreAdaptor -> InfinispanSlots -> "
                     + LRA_OBJECTSTORE_CACHE_NAME + " cache (replicated)");
             return true;
 
-        } catch (Exception e) {
-            LRALogger.logger.errorf(e, "Failed to configure HA ObjectStore. "
+        } catch (Throwable t) {
+            LRALogger.logger.warnf(t, "Failed to configure HA ObjectStore (InfinispanSlots may not be "
+                    + "available in this Narayana version). "
                     + "Falling back to default filesystem-based ObjectStore. "
                     + "LRA state will NOT be replicated across the cluster.");
             return false;
@@ -138,8 +139,6 @@ public class HAObjectStoreConfiguration {
         String groupName = System.getProperty("lra.coordinator.cluster.name", "lra");
         ispnEnvBean.setGroupName(groupName);
 
-        ispnEnvBean.setSlotKeyGenerator(new LRASlotKeyGenerator(nodeId, groupName));
-
         LRALogger.logger.debugf("InfinispanSlots configured: cache=%s, nodeId=%s, groupName=%s",
                 LRA_OBJECTSTORE_CACHE_NAME, nodeId, groupName);
     }
@@ -181,40 +180,4 @@ public class HAObjectStoreConfiguration {
         }
     }
 
-    /**
-     * Generates per-node cache keys in the format: {groupId};nodeId;uid;slotIndex.
-     * This enables multi-node HA: each node produces unique keys, and
-     * cache.keySet() returns all keys from all nodes for recovery scanning.
-     */
-    private static class LRASlotKeyGenerator implements InfinispanSlotKeyGenerator {
-
-        private String groupId;
-        private String nodeId;
-        private Uid uid;
-
-        LRASlotKeyGenerator(String nodeId, String groupId) {
-            this.nodeId = nodeId;
-            this.groupId = groupId;
-            this.uid = new Uid();
-        }
-
-        @Override
-        public byte[] generateUniqueKey(int index) {
-            return String.format("{%s};%s;%s;%d", groupId, nodeId, uid.stringForm(), index)
-                    .getBytes(StandardCharsets.UTF_8);
-        }
-
-        @Override
-        public void init(InfinispanStoreEnvironmentBean config) {
-            String gn = config.getGroupName();
-            if (gn != null && !gn.isEmpty()) {
-                this.groupId = gn;
-            }
-            String na = config.getNodeAddress();
-            if (na != null && !na.isEmpty()) {
-                this.nodeId = na;
-            }
-            this.uid = new Uid();
-        }
-    }
 }

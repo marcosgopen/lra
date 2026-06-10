@@ -341,22 +341,9 @@ public class LRAService {
 
         String lraUid = extractLraUidFromRecoveryUrl(rcvCoordId);
         if (lraUid != null) {
-            LongRunningAction lra = findByUid(lras, lraUid);
-            if (lra == null) {
-                lra = findByUid(recoveringLRAs, lraUid);
-            }
-            if (lra == null) {
-                lra = loadLRAFromObjectStore(lraUid);
-            }
+            LongRunningAction lra = loadLRAFromObjectStore(lraUid);
             if (lra != null) {
-                String url = lra.lookupParticipantUrl(rcvCoordId);
-                if (url == null) {
-                    lra = loadLRAFromObjectStore(lraUid);
-                    if (lra != null) {
-                        url = lra.lookupParticipantUrl(rcvCoordId);
-                    }
-                }
-                return url;
+                return lra.lookupParticipantUrl(rcvCoordId);
             }
         }
 
@@ -592,9 +579,14 @@ public class LRAService {
                     .build());
         }
 
-        if (haEnabled && !transaction.deactivate()) {
-            LRALogger.logger.warn(LRALogger.i18nLogger.warn_saveState(
-                    "HA: failed to persist participant state after join"));
+        if (haEnabled) {
+            try {
+                if (!transaction.deactivate()) {
+                    LRALogger.logger.warnf("HA joinLRA: deactivate returned false for %s", lra);
+                }
+            } catch (Throwable t) {
+                LRALogger.logger.warnf(t, "HA joinLRA: deactivate threw for %s", lra);
+            }
         }
 
         recoveryUrl.append(recoveryURI);

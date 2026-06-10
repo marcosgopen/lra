@@ -26,7 +26,6 @@ import org.jboss.arquillian.test.api.ArquillianResource;
 import org.jboss.shrinkwrap.api.spec.WebArchive;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -42,8 +41,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
  * These tests exercise the distributed store fallback path where
  * the local in-memory state does not contain the LRA.
  */
-@Disabled("Pending Narayana fix: InfinispanSlots cross-node ObjectStore reads return stale data. "
-        + "See INFINISPAN_SLOTS_CROSS_NODE_ISSUE.md")
 @ExtendWith(ArquillianExtension.class)
 @RunAsClient
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)

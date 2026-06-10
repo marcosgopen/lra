@@ -72,7 +72,11 @@ public class HAObjectStoreConfiguration {
 
             configureObjectStoreBean();
 
-            StoreManager.shutdown();
+            try {
+                StoreManager.shutdown();
+            } catch (Exception e) {
+                LRALogger.logger.debugf("StoreManager.shutdown() during configure: %s", e.getMessage());
+            }
 
             LRALogger.logger.info("HA ObjectStore configured: SlotStoreAdaptor -> InfinispanSlots -> "
                     + LRA_OBJECTSTORE_CACHE_NAME + " cache (replicated)");
@@ -112,10 +116,16 @@ public class HAObjectStoreConfiguration {
      * Configures the ObjectStoreEnvironmentBean to use SlotStoreAdaptor.
      */
     private static void configureObjectStoreBean() {
-        ObjectStoreEnvironmentBean defaultBean = BeanPopulator.getDefaultInstance(ObjectStoreEnvironmentBean.class);
-        defaultBean.setObjectStoreType(SlotStoreAdaptor.class.getName());
+        String storeType = SlotStoreAdaptor.class.getName();
 
-        LRALogger.logger.debugf("ObjectStore type set to: %s", SlotStoreAdaptor.class.getName());
+        BeanPopulator.getDefaultInstance(ObjectStoreEnvironmentBean.class)
+                .setObjectStoreType(storeType);
+        BeanPopulator.getNamedInstance(ObjectStoreEnvironmentBean.class, "stateStore")
+                .setObjectStoreType(storeType);
+        BeanPopulator.getNamedInstance(ObjectStoreEnvironmentBean.class, "communicationStore")
+                .setObjectStoreType(storeType);
+
+        LRALogger.logger.debugf("ObjectStore type set to: %s", storeType);
     }
 
     /**

@@ -62,6 +62,7 @@ if (outcome != success) of /subsystem=infinispan/cache-container=lra:read-resour
     /subsystem=infinispan/cache-container=lra/replicated-cache=lra-failed/component=partition-handling:add(when-split=DENY_READ_WRITES)
     /subsystem=infinispan/cache-container=lra/replicated-cache=lra-objectstore:add()
     /subsystem=infinispan/cache-container=lra/replicated-cache=lra-objectstore/component=partition-handling:add(when-split=DENY_READ_WRITES)
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-objectstore/component=transaction:add(mode=BATCH)
     run-batch
 end-if
 

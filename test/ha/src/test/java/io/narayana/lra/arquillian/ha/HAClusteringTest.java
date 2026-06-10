@@ -10,9 +10,22 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.arjuna.ats.arjuna.common.ObjectStoreEnvironmentBean;
+import com.arjuna.ats.arjuna.objectstore.StoreManager;
+import com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreAdaptor;
+import com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreEnvironmentBean;
+import com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanSlots;
+import com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanStoreEnvironmentBean;
+import com.arjuna.common.internal.util.propertyservice.BeanPopulator;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.domain.service.LRAService;
 import io.narayana.lra.coordinator.infinispan.InfinispanClusterCoordinator;
+import org.infinispan.Cache;
+import org.infinispan.configuration.cache.CacheMode;
+import org.infinispan.configuration.cache.ConfigurationBuilder;
+import org.infinispan.configuration.global.GlobalConfigurationBuilder;
+import org.infinispan.manager.DefaultCacheManager;
+import org.infinispan.manager.EmbeddedCacheManager;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -248,6 +261,166 @@ public class HAClusteringTest {
             restoreProperty("lra.coordinator.ha.enabled", originalHaEnabled);
             restoreProperty("lra.coordinator.node.id", originalNodeId);
         }
+    }
+
+    @Test
+    void testParticipantSurvivesWithInfinispanSlots() throws Exception {
+        io.narayana.lra.coordinator.internal.Implementations.install();
+
+        GlobalConfigurationBuilder gcb = new GlobalConfigurationBuilder();
+        gcb.nonClusteredDefault();
+        EmbeddedCacheManager cm = new DefaultCacheManager(gcb.build());
+
+        ConfigurationBuilder cb = new ConfigurationBuilder();
+        cb.clustering().cacheMode(CacheMode.LOCAL);
+        cb.invocationBatching().enable();
+        cm.defineConfiguration("lra-objectstore", cb.build());
+        Cache<byte[], byte[]> cache = cm.getCache("lra-objectstore");
+
+        try {
+            String storeType = SlotStoreAdaptor.class.getName();
+            SlotStoreEnvironmentBean slotBean = BeanPopulator.getDefaultInstance(SlotStoreEnvironmentBean.class);
+            slotBean.setNumberOfSlots(256);
+            slotBean.setBackingSlotsClassName(InfinispanSlots.class.getName());
+
+            InfinispanStoreEnvironmentBean ispnBean = BeanPopulator.getDefaultInstance(InfinispanStoreEnvironmentBean.class);
+            ispnBean.setCache(cache);
+            ispnBean.setNodeAddress("test-node");
+
+            for (String name : new String[] { null, "stateStore", "communicationStore" }) {
+                if (name == null) {
+                    BeanPopulator.getDefaultInstance(ObjectStoreEnvironmentBean.class).setObjectStoreType(storeType);
+                } else {
+                    BeanPopulator.getNamedInstance(ObjectStoreEnvironmentBean.class, name).setObjectStoreType(storeType);
+                }
+            }
+
+            StoreManager.shutdown();
+
+            LRAService service = new LRAService();
+            String baseUrl = "http://localhost:8080/lra-coordinator";
+            String recoveryUrlBase = baseUrl + "/lra-coordinator/recovery";
+
+            LongRunningAction lra = new LongRunningAction(service, baseUrl, null, "test-client");
+
+            try {
+                boolean firstDeactivate = lra.deactivate();
+                assertEquals(true, firstDeactivate, "first deactivate should succeed, cache.size=" + cache.size());
+            } catch (Throwable t) {
+                throw new AssertionError("first deactivate threw: " + t, t);
+            }
+
+            String participantUrl = "<http://example.com/compensate>;rel=\"compensate\","
+                    + "<http://example.com/complete>;rel=\"complete\"";
+            var participant = lra.enlistParticipant(lra.getId(), participantUrl, recoveryUrlBase, 0L, null, null);
+            assertNotNull(participant, "enlistParticipant should return non-null");
+
+            assertTrue(lra.deactivate(), "deactivate after enlist should succeed");
+
+            int cacheSize = cache.size();
+            assertTrue(cacheSize > 0, "Cache should have at least 1 entry, got " + cacheSize);
+
+            // Simulate cross-node: shutdown store, reinitialize, activate
+            StoreManager.shutdown();
+            slotBean.setBackingSlots(null);
+            slotBean.setBackingSlotsClassName(InfinispanSlots.class.getName());
+
+            com.arjuna.ats.arjuna.common.Uid uid = lra.get_uid();
+            LongRunningAction restored = new LongRunningAction(service, uid);
+            assertTrue(restored.activate(), "activate from InfinispanSlots should succeed");
+            assertTrue(restored.hasPendingActions(),
+                    "Restored LRA should have pending participant records");
+
+            String recoveryUrl = participant.getRecoveryURI().toASCIIString();
+            String crossNodeUrl = recoveryUrl.replace("localhost:8080", "localhost:8180");
+            String result = restored.lookupParticipantUrl(crossNodeUrl);
+            assertNotNull(result,
+                    "lookupParticipantUrl should find participant via InfinispanSlots. url=" + crossNodeUrl);
+        } finally {
+            StoreManager.shutdown();
+            cm.stop();
+        }
+    }
+
+    @Test
+    void testParticipantSurvivesDeactivateActivateCycle() throws Exception {
+        io.narayana.lra.coordinator.internal.Implementations.install();
+
+        LRAService service = new LRAService();
+        String baseUrl = "http://localhost:8080/lra-coordinator";
+        String recoveryUrlBase = baseUrl + "/lra-coordinator/recovery";
+
+        LongRunningAction lra = new LongRunningAction(service, baseUrl, null, "test-client");
+        lra.begin(0L);
+
+        String participantUrl = "<http://example.com/compensate>;rel=\"compensate\","
+                + "<http://example.com/complete>;rel=\"complete\"";
+        var participant = lra.enlistParticipant(lra.getId(), participantUrl, recoveryUrlBase, 0L, null, null);
+        assertNotNull(participant, "enlistParticipant should return non-null");
+
+        assertTrue(lra.deactivate(), "deactivate after enlist should succeed");
+
+        com.arjuna.ats.arjuna.common.Uid uid = lra.get_uid();
+        LongRunningAction restored = new LongRunningAction(service, uid);
+        assertTrue(restored.activate(), "activate from ObjectStore should succeed");
+
+        assertNotNull(restored.getId(), "Restored LRA should have an ID");
+        assertTrue(restored.hasPendingActions(),
+                "Restored LRA should have pending participant records after activate");
+
+        String recoveryUrl = participant.getRecoveryURI().toASCIIString();
+        String participantResult = restored.lookupParticipantUrl(recoveryUrl);
+        assertNotNull(participantResult,
+                "lookupParticipantUrl should find the participant after activate. recoveryUrl=" + recoveryUrl);
+
+        // Also test cross-node scenario: different host but same path
+        String crossNodeUrl = recoveryUrl.replace("localhost:8080", "localhost:8180");
+        String crossNodeResult = restored.lookupParticipantUrl(crossNodeUrl);
+        assertNotNull(crossNodeResult,
+                "lookupParticipantUrl should find participant via path matching. crossNodeUrl=" + crossNodeUrl);
+
+        // Now simulate what happens in HA: StoreManager.shutdown() between write and read.
+        // This creates a new store instance, similar to refreshObjectStoreForRecovery().
+        com.arjuna.ats.arjuna.objectstore.StoreManager.shutdown();
+
+        LongRunningAction restored2 = new LongRunningAction(service, uid);
+        assertTrue(restored2.activate(), "activate after StoreManager.shutdown should succeed");
+        assertTrue(restored2.hasPendingActions(),
+                "Restored LRA should have pending records after StoreManager.shutdown + activate");
+
+        String result2 = restored2.lookupParticipantUrl(crossNodeUrl);
+        assertNotNull(result2,
+                "lookupParticipantUrl should work after StoreManager.shutdown + activate");
+
+        // Verify that the stateStore named bean reads from the same store as the default bean.
+        // In WildFly, StateManager.activate() uses StoreManager.setupStore("stateStore"),
+        // while BasicAction.deactivate() uses StoreManager.getParticipantStore() (default).
+        // If they use different ObjectStore types, writes and reads go to different stores.
+        var defaultBean = com.arjuna.common.internal.util.propertyservice.BeanPopulator
+                .getDefaultInstance(com.arjuna.ats.arjuna.common.ObjectStoreEnvironmentBean.class);
+        var stateStoreBean = com.arjuna.common.internal.util.propertyservice.BeanPopulator
+                .getNamedInstance(com.arjuna.ats.arjuna.common.ObjectStoreEnvironmentBean.class, "stateStore");
+
+        assertEquals(defaultBean.getObjectStoreType(), stateStoreBean.getObjectStoreType(),
+                "Default and stateStore ObjectStoreEnvironmentBeans should use the same store type. "
+                        + "If they differ, writes (via default) go to one store and reads (via stateStore) go to another.");
+
+        // Simulate what happens in WildFly HA: only the default bean is changed to SlotStoreAdaptor.
+        // The stateStore bean retains the old type. This is the bug.
+        String slotStoreType = "com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreAdaptor";
+        String originalDefault = defaultBean.getObjectStoreType();
+        String originalState = stateStoreBean.getObjectStoreType();
+
+        defaultBean.setObjectStoreType(slotStoreType);
+        // stateStoreBean NOT updated — simulates the bug
+
+        assertFalse(defaultBean.getObjectStoreType().equals(stateStoreBean.getObjectStoreType()),
+                "BUG REPRODUCED: default and stateStore now use different types, "
+                        + "meaning deactivate() writes to SlotStoreAdaptor but activate() reads from "
+                        + stateStoreBean.getObjectStoreType());
+
+        // Restore
+        defaultBean.setObjectStoreType(originalDefault);
     }
 
     private static void restoreProperty(String key, String originalValue) {

@@ -311,7 +311,9 @@ public class LRARecoveryModule implements RecoveryModule,
     private void refreshObjectStoreForRecovery() {
         try {
             SlotStoreEnvironmentBean slotEnvBean = BeanPopulator.getDefaultInstance(SlotStoreEnvironmentBean.class);
+            String backingSlotsClassName = slotEnvBean.getBackingSlotsClassName();
             slotEnvBean.setBackingSlots(null);
+            slotEnvBean.setBackingSlotsClassName(backingSlotsClassName);
 
             StoreManager.shutdown();
             _recoveryStore = StoreManager.getRecoveryStore();

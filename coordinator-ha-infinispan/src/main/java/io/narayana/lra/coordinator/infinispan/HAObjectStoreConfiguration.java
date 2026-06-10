@@ -6,6 +6,7 @@
 package io.narayana.lra.coordinator.infinispan;
 
 import com.arjuna.ats.arjuna.common.ObjectStoreEnvironmentBean;
+import com.arjuna.ats.arjuna.objectstore.StoreManager;
 import com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreAdaptor;
 import com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreEnvironmentBean;
 import com.arjuna.ats.internal.arjuna.objectstore.slot.infinispan.InfinispanSlots;
@@ -70,6 +71,8 @@ public class HAObjectStoreConfiguration {
             configureSlotStoreBean(cache);
 
             configureObjectStoreBean();
+
+            StoreManager.shutdown();
 
             LRALogger.logger.info("HA ObjectStore configured: SlotStoreAdaptor -> InfinispanSlots -> "
                     + LRA_OBJECTSTORE_CACHE_NAME + " cache (replicated)");
@@ -136,11 +139,8 @@ public class HAObjectStoreConfiguration {
         String nodeId = System.getProperty("lra.coordinator.node.id", getHostname());
         ispnEnvBean.setNodeAddress(nodeId);
 
-        String groupName = System.getProperty("lra.coordinator.cluster.name", "lra");
-        ispnEnvBean.setGroupName(groupName);
-
-        LRALogger.logger.debugf("InfinispanSlots configured: cache=%s, nodeId=%s, groupName=%s",
-                LRA_OBJECTSTORE_CACHE_NAME, nodeId, groupName);
+        LRALogger.logger.debugf("InfinispanSlots configured: cache=%s, nodeId=%s",
+                LRA_OBJECTSTORE_CACHE_NAME, nodeId);
     }
 
     private static String getHostname() {

@@ -283,6 +283,11 @@ public class TestHelpers {
                 + "    <resource-env-ref-type>org.infinispan.Cache</resource-env-ref-type>\n"
                 + "    <lookup-name>java:jboss/infinispan/cache/lra/lra-failed</lookup-name>\n"
                 + "  </resource-env-ref>\n"
+                + "  <resource-env-ref>\n"
+                + "    <resource-env-ref-name>infinispan/cache/lra/lra-objectstore</resource-env-ref-name>\n"
+                + "    <resource-env-ref-type>org.infinispan.Cache</resource-env-ref-type>\n"
+                + "    <lookup-name>java:jboss/infinispan/cache/lra/lra-objectstore</lookup-name>\n"
+                + "  </resource-env-ref>\n"
                 + "</web-app>\n";
 
         return ShrinkWrap.create(WebArchive.class, "lra-coordinator.war")

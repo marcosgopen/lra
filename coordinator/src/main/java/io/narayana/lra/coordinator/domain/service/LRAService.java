@@ -107,6 +107,21 @@ public class LRAService {
         return null;
     }
 
+    private LongRunningAction loadLRAFromObjectStore(String uid) {
+        try {
+            getRM().recover();
+            Uid arjunaUid = new Uid(uid);
+            LongRunningAction lra = new LongRunningAction(this, arjunaUid);
+            if (lra.activate()) {
+                lras.put(lra.getId(), lra);
+                return lra;
+            }
+        } catch (Throwable e) {
+            LRALogger.logger.debugf("Failed to load LRA %s from ObjectStore: %s", uid, e.getMessage());
+        }
+        return null;
+    }
+
     public LongRunningAction lookupTransaction(URI lraId) {
         try {
             return lraId == null ? null : getTransaction(lraId);
@@ -321,6 +336,27 @@ public class LRAService {
 
             if (compensator != null) {
                 return compensator;
+            }
+        }
+
+        String lraUid = extractLraUidFromRecoveryUrl(rcvCoordId);
+        if (lraUid != null) {
+            LongRunningAction lra = findByUid(lras, lraUid);
+            if (lra == null) {
+                lra = findByUid(recoveringLRAs, lraUid);
+            }
+            if (lra == null) {
+                lra = loadLRAFromObjectStore(lraUid);
+            }
+            if (lra != null) {
+                String url = lra.lookupParticipantUrl(rcvCoordId);
+                if (url == null) {
+                    lra = loadLRAFromObjectStore(lraUid);
+                    if (lra != null) {
+                        url = lra.lookupParticipantUrl(rcvCoordId);
+                    }
+                }
+                return url;
             }
         }
 
@@ -554,6 +590,11 @@ public class LRAService {
             throw new WebApplicationException(msg, Response.status(SERVICE_UNAVAILABLE)
                     .entity(msg)
                     .build());
+        }
+
+        if (haEnabled && !transaction.deactivate()) {
+            LRALogger.logger.warn(LRALogger.i18nLogger.warn_saveState(
+                    "HA: failed to persist participant state after join"));
         }
 
         recoveryUrl.append(recoveryURI);

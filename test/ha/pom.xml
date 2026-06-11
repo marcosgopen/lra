@@ -260,15 +260,6 @@
       </properties>
     </profile>
 
-    <!-- Profile for running performance tests (requires WildFly) -->
-    <profile>
-      <id>ha-performance-tests</id>
-      <properties>
-        <ha.test.includes>**/PerformanceIT.java</ha.test.includes>
-        <ha.test.timeout>900</ha.test.timeout>
-      </properties>
-    </profile>
-
     <!-- Profile for running concurrent consistency tests (requires WildFly) -->
     <profile>
       <id>ha-concurrent-tests</id>

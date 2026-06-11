@@ -23,14 +23,15 @@ import org.infinispan.manager.EmbeddedCacheManager;
 /**
  * CDI configuration for Infinispan in LRA HA mode.
  *
- * Provides the EmbeddedCacheManager used by:
+ * Provides the EmbeddedCacheManager and ClusterCoordinationService used by:
  * - InfinispanClusterCoordinator (JGroups-based leader election)
- * - InfinispanSlots (BackingSlots implementation for ObjectStore)
+ * - LRAService (distributed caches for cross-node LRA visibility and participant replication)
  *
- * LRA state persistence flows through Narayana's standard ObjectStore path
- * (SlotStoreAdaptor → SlotStore → InfinispanSlots → Infinispan cache).
- * This class no longer creates LRA-specific caches — the SlotStore manages
- * its own cache via InfinispanStoreEnvironmentBean.
+ * HA persistence uses two Infinispan caches:
+ * - lra-active: Map&lt;String, String&gt; — UID → LRA URI (active LRA registry)
+ * - lra-participants: Map&lt;String, String&gt; — recovery URL path → participant link header
+ *
+ * Local filesystem ObjectStore is kept for disaster recovery (full cluster restart).
  */
 @ApplicationScoped
 public class InfinispanConfiguration {
@@ -70,10 +71,6 @@ public class InfinispanConfiguration {
             }
 
             initialized = true;
-
-            // Configure Narayana's ObjectStore to use InfinispanSlots (if available).
-            // This routes all LRA state persistence through the replicated Infinispan cache.
-            HAObjectStoreConfiguration.configure(cacheManager);
         } catch (Exception e) {
             LRALogger.logger.errorf(e, "Failed to initialize Infinispan for LRA HA mode");
             throw new RuntimeException("Failed to initialize Infinispan", e);
@@ -103,10 +100,6 @@ public class InfinispanConfiguration {
     /**
      * Initializes an embedded Infinispan cache manager with JGroups transport.
      * Used for standalone/Quarkus deployments where WildFly's subsystem is not available.
-     *
-     * Note: LRA state caches are not created here — the SlotStore/InfinispanSlots
-     * manages its own cache via InfinispanStoreEnvironmentBean. This method only
-     * sets up the JGroups transport for cluster coordination (leader election).
      */
     private void initializeEmbedded() {
         // Get cluster name from system property or environment variable
@@ -149,15 +142,17 @@ public class InfinispanConfiguration {
 
         cacheManager = new DefaultCacheManager(globalConfig.build());
 
-        // Define the lra-active cache used as the distributed LRA registry.
-        // In WildFly mode this cache is pre-configured via the Infinispan subsystem;
-        // in embedded mode we define it programmatically.
-        if (!cacheManager.cacheExists("lra-active")) {
-            ConfigurationBuilder cacheBuilder = new ConfigurationBuilder();
-            cacheBuilder.clustering().cacheMode(CacheMode.REPL_SYNC)
-                    .partitionHandling()
-                    .whenSplit(org.infinispan.partitionhandling.PartitionHandling.ALLOW_READS);
-            cacheManager.defineConfiguration("lra-active", cacheBuilder.build());
+        // Define caches used for HA. In WildFly mode these are pre-configured
+        // via the Infinispan subsystem; in embedded mode we define them here.
+        ConfigurationBuilder cacheBuilder = new ConfigurationBuilder();
+        cacheBuilder.clustering().cacheMode(CacheMode.REPL_SYNC)
+                .partitionHandling()
+                .whenSplit(org.infinispan.partitionhandling.PartitionHandling.DENY_READ_WRITES);
+
+        for (String cacheName : new String[] { "lra-active", "lra-participants" }) {
+            if (!cacheManager.cacheExists(cacheName)) {
+                cacheManager.defineConfiguration(cacheName, cacheBuilder.build());
+            }
         }
 
         LRALogger.logger.infof("Infinispan initialized in embedded mode for cluster '%s' with node name '%s'",

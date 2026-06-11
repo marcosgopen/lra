@@ -16,8 +16,6 @@ import com.arjuna.ats.arjuna.recovery.RecoveryModule;
 import com.arjuna.ats.arjuna.recovery.TransactionStatusConnectionManager;
 import com.arjuna.ats.arjuna.state.InputObjectState;
 import com.arjuna.ats.arjuna.state.OutputObjectState;
-import com.arjuna.ats.internal.arjuna.objectstore.slot.SlotStoreEnvironmentBean;
-import com.arjuna.common.internal.util.propertyservice.BeanPopulator;
 import io.narayana.lra.coordinator.domain.model.FailedLongRunningAction;
 import io.narayana.lra.coordinator.domain.model.LongRunningAction;
 import io.narayana.lra.coordinator.domain.service.LRAService;
@@ -115,7 +113,8 @@ public class LRARecoveryModule implements RecoveryModule,
 
             this.haEnabled = true;
             Map<String, String> activeCache = clusterCoordinator.getDistributedMap("lra-active");
-            service.initializeHA(clusterCoordinator, activeCache);
+            Map<String, String> participantsCache = clusterCoordinator.getDistributedMap("lra-participants");
+            service.initializeHA(clusterCoordinator, activeCache, participantsCache);
 
             // Register for cluster coordinator change notifications
             if (clusterCoordinator != null && clusterCoordinator.isInitialized()) {
@@ -256,74 +255,20 @@ public class LRARecoveryModule implements RecoveryModule,
     }
 
     /**
-     * Recovers LRA transactions.
-     * In HA mode, loads from distributed store.
-     * In single-instance mode, loads from ObjectStore.
+     * Recovers LRA transactions from the local filesystem ObjectStore.
+     * In HA mode, cross-node participant data is in the Infinispan caches
+     * (lra-active, lra-participants) — the ObjectStore only holds local entries
+     * for disaster recovery after a full cluster restart.
      */
     private synchronized void recoverTransactions() {
-        recoverTransactionsFromObjectStore();
-    }
-
-    /**
-     * Recovers LRAs from ObjectStore.
-     * In HA mode with InfinispanSlots as the BackingSlots implementation,
-     * the ObjectStore reads from the replicated Infinispan cache, so all
-     * coordinators see the same data. Only the recovery leader runs this.
-     */
-    private void recoverTransactionsFromObjectStore() {
         if (LRALogger.logger.isDebugEnabled()) {
             LRALogger.logger.debug("LRARecoveryModule: recovering transactions from ObjectStore");
         }
 
-        if (haEnabled) {
-            refreshObjectStoreForRecovery();
-        }
-
-        // uids per transaction type
         InputObjectState aa_uids = new InputObjectState();
 
         if (getUids(_transactionType, aa_uids)) {
             processTransactionsStatus(processTransactions(aa_uids));
-        }
-    }
-
-    /**
-     * Refreshes the ObjectStore so the recovery leader sees entries from all
-     * cluster nodes, not just entries written locally since initialization.
-     *
-     * <p>
-     * The SlotStore's internal index ({@code slotIdIndex}) is populated at
-     * construction time from {@code InfinispanSlots.init()} which loads keys
-     * via {@code cache.keySet()}. After construction, entries written by other
-     * nodes are invisible to this node's index. This method forces a fresh
-     * {@code InfinispanSlots} initialization by:
-     * </p>
-     * <ol>
-     * <li>Resetting the cached BackingSlots on SlotStoreEnvironmentBean</li>
-     * <li>Discarding the current StoreManager instance</li>
-     * <li>Recreating the RecoveryStore (triggers InfinispanSlots.init() with
-     * current cache.keySet())</li>
-     * </ol>
-     *
-     * @see <a href="https://github.com/jbosstm/narayana/pull/2537">
-     *      InfinispanClusterTest.startRecoveryStore() pattern</a>
-     */
-    private void refreshObjectStoreForRecovery() {
-        try {
-            SlotStoreEnvironmentBean slotEnvBean = BeanPopulator.getDefaultInstance(SlotStoreEnvironmentBean.class);
-            String backingSlotsClassName = slotEnvBean.getBackingSlotsClassName();
-            slotEnvBean.setBackingSlots(null);
-            slotEnvBean.setBackingSlotsClassName(backingSlotsClassName);
-
-            StoreManager.shutdown();
-            _recoveryStore = StoreManager.getRecoveryStore();
-
-            if (LRALogger.logger.isDebugEnabled()) {
-                LRALogger.logger.debug("LRARecoveryModule: refreshed ObjectStore index for HA recovery");
-            }
-        } catch (Exception e) {
-            LRALogger.logger.warnf(e, "LRARecoveryModule: failed to refresh ObjectStore for HA recovery, "
-                    + "recovery may not see entries from other nodes");
         }
     }
 

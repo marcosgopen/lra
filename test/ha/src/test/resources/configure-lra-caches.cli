@@ -15,10 +15,10 @@
 ##   - InfinispanClusterCoordinator (JGroups-based leader election)
 ##   - InfinispanConfiguration (JNDI lookup of java:jboss/infinispan/container/lra)
 ##
-## The replicated caches (lra-active, lra-recovering, lra-failed, lra-objectstore)
-## are declared as resource-env-refs in the coordinator WAR's web.xml; WildFly
-## validates they exist at deploy time, so they must be pre-configured here.
-## lra-objectstore is used by InfinispanSlots for distributed LRA state storage.
+## The replicated caches are declared as resource-env-refs in the coordinator
+## WAR's web.xml; WildFly validates they exist at deploy time.
+## lra-active: UID → LRA URI registry for cross-node visibility.
+## lra-participants: recovery URL path → participant link header for HA failover.
 
 embed-server --server-config=lra-coordinator.xml --std-out=discard
 
@@ -60,9 +60,8 @@ if (outcome != success) of /subsystem=infinispan/cache-container=lra:read-resour
     /subsystem=infinispan/cache-container=lra/replicated-cache=lra-recovering/component=partition-handling:add(when-split=DENY_READ_WRITES)
     /subsystem=infinispan/cache-container=lra/replicated-cache=lra-failed:add()
     /subsystem=infinispan/cache-container=lra/replicated-cache=lra-failed/component=partition-handling:add(when-split=DENY_READ_WRITES)
-    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-objectstore:add()
-    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-objectstore/component=partition-handling:add(when-split=DENY_READ_WRITES)
-    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-objectstore/component=transaction:add(mode=BATCH)
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-participants:add()
+    /subsystem=infinispan/cache-container=lra/replicated-cache=lra-participants/component=partition-handling:add(when-split=DENY_READ_WRITES)
     run-batch
 end-if
 

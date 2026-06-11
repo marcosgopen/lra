@@ -284,9 +284,9 @@ public class TestHelpers {
                 + "    <lookup-name>java:jboss/infinispan/cache/lra/lra-failed</lookup-name>\n"
                 + "  </resource-env-ref>\n"
                 + "  <resource-env-ref>\n"
-                + "    <resource-env-ref-name>infinispan/cache/lra/lra-objectstore</resource-env-ref-name>\n"
+                + "    <resource-env-ref-name>infinispan/cache/lra/lra-participants</resource-env-ref-name>\n"
                 + "    <resource-env-ref-type>org.infinispan.Cache</resource-env-ref-type>\n"
-                + "    <lookup-name>java:jboss/infinispan/cache/lra/lra-objectstore</lookup-name>\n"
+                + "    <lookup-name>java:jboss/infinispan/cache/lra/lra-participants</lookup-name>\n"
                 + "  </resource-env-ref>\n"
                 + "</web-app>\n";
 

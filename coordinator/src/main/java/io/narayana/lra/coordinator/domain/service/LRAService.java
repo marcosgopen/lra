@@ -51,8 +51,9 @@ public class LRAService {
     // HA components (injected by LRARecoveryModule when HA is enabled)
     private ClusterCoordinationService clusterCoordinator;
     private Map<String, String> lraActiveCache;
+    private Map<String, String> lraParticipantsCache;
     private String nodeId;
-    private boolean haEnabled = false;
+    private volatile boolean haEnabled = false;
 
     public LongRunningAction getTransaction(URI lraId) throws NotFoundException {
         // Fast path: check active LRAs first (atomic get)
@@ -88,7 +89,6 @@ public class LRAService {
             return lra;
         }
 
-        // Not found in local memory
         String errorMsg = "Cannot find transaction id: " + lraId;
         throw new NotFoundException(errorMsg,
                 Response.status(NOT_FOUND).entity(errorMsg).build());
@@ -103,21 +103,6 @@ public class LRAService {
             if (uid.equals(lra.get_uid().fileStringForm())) {
                 return lra;
             }
-        }
-        return null;
-    }
-
-    private LongRunningAction loadLRAFromObjectStore(String uid) {
-        try {
-            getRM().recover();
-            Uid arjunaUid = new Uid(uid);
-            LongRunningAction lra = new LongRunningAction(this, arjunaUid);
-            if (lra.activate()) {
-                lras.put(lra.getId(), lra);
-                return lra;
-            }
-        } catch (Throwable e) {
-            LRALogger.logger.debugf("Failed to load LRA %s from ObjectStore: %s", uid, e.getMessage());
         }
         return null;
     }
@@ -282,10 +267,24 @@ public class LRAService {
         LongRunningAction lra = lras.remove(lraId);
 
         if (lra != null) {
-            lraParticipants.remove(lra);
-            if (haEnabled && lraActiveCache != null) {
+            Map<String, String> participants = lraParticipants.remove(lra);
+            if (haEnabled) {
                 try {
-                    lraActiveCache.remove(lra.get_uid().fileStringForm());
+                    if (lraActiveCache != null) {
+                        lraActiveCache.remove(lra.get_uid().fileStringForm());
+                    }
+                    if (lraParticipantsCache != null && participants != null) {
+                        for (String recoveryURI : participants.keySet()) {
+                            try {
+                                String path = new URI(recoveryURI).getPath();
+                                if (path != null) {
+                                    lraParticipantsCache.remove(path);
+                                }
+                            } catch (URISyntaxException e) {
+                                // skip
+                            }
+                        }
+                    }
                 } catch (Exception e) {
                     LRALogger.logger.warnf(e, "Failed to remove LRA %s from distributed cache", lraId);
                 }
@@ -309,21 +308,26 @@ public class LRAService {
     public boolean updateRecoveryURI(URI lraId, String compensatorUrl, String recoveryURI, boolean persist) {
         assert recoveryURI != null;
         assert compensatorUrl != null;
-        LongRunningAction transaction = getTransaction(lraId);
-        Map<String, String> participants = lraParticipants.get(transaction);
 
-        // the <participants> collection should be thread safe against update requests, even though such concurrent
-        // updates are improbable because only LRAService.joinLRA and RecoveryCoordinator.replaceCompensator
-        // do updates but those are sequential operations anyway
-        if (participants == null) {
-            participants = new ConcurrentHashMap<>();
-            participants.put(recoveryURI, compensatorUrl);
-            lraParticipants.put(transaction, participants);
-        } else {
-            participants.replace(recoveryURI, compensatorUrl);
+        LongRunningAction transaction = lookupTransaction(lraId);
+
+        if (transaction != null) {
+            lraParticipants.computeIfAbsent(transaction, k -> new ConcurrentHashMap<>())
+                    .put(recoveryURI, compensatorUrl);
         }
 
-        if (persist) {
+        if (haEnabled && lraParticipantsCache != null) {
+            try {
+                String path = new URI(recoveryURI).getPath();
+                if (path != null) {
+                    lraParticipantsCache.put(path, compensatorUrl);
+                }
+            } catch (URISyntaxException e) {
+                // fall through
+            }
+        }
+
+        if (persist && transaction != null) {
             return transaction.updateRecoveryURI(compensatorUrl, recoveryURI);
         }
 
@@ -331,6 +335,20 @@ public class LRAService {
     }
 
     public String getParticipant(String rcvCoordId) {
+        if (haEnabled && lraParticipantsCache != null) {
+            try {
+                String path = new URI(rcvCoordId).getPath();
+                if (path != null) {
+                    String cached = lraParticipantsCache.get(path);
+                    if (cached != null) {
+                        return cached;
+                    }
+                }
+            } catch (URISyntaxException e) {
+                // fall through to local lookup
+            }
+        }
+
         for (Map<String, String> compensators : lraParticipants.values()) {
             String compensator = compensators.get(rcvCoordId);
 
@@ -339,50 +357,7 @@ public class LRAService {
             }
         }
 
-        String lraUid = extractLraUidFromRecoveryUrl(rcvCoordId);
-        if (lraUid != null) {
-            LongRunningAction lra = loadLRAFromObjectStore(lraUid);
-            if (lra != null) {
-                return lra.lookupParticipantUrl(rcvCoordId);
-            }
-        }
-
         return null;
-    }
-
-    /**
-     * Extracts the LRA UID from an LRA ID URI.
-     * Handles both full URIs (http://host/lra-coordinator/uid) and
-     * UID-only values (uid) as used by recovery URL path parameters.
-     */
-    private String extractLraUid(URI lraId) {
-        if (lraId == null) {
-            return null;
-        }
-        String uid = LRAConstants.getLRAUid(lraId);
-        return (uid != null && !uid.isEmpty()) ? uid : null;
-    }
-
-    /**
-     * Extracts the LRA UID segment from a recovery URL.
-     * Recovery URL format: {base}/lra-coordinator/recovery/{lraUid}/{participantUid}
-     * The LRA UID is the second-to-last path segment.
-     */
-    private String extractLraUidFromRecoveryUrl(String recoveryUrl) {
-        try {
-            URI uri = new URI(recoveryUrl);
-            String path = uri.getPath();
-            if (path == null) {
-                return null;
-            }
-            String[] segments = path.split("/");
-            if (segments.length < 2) {
-                return null;
-            }
-            return segments[segments.length - 2];
-        } catch (URISyntaxException e) {
-            return null;
-        }
     }
 
     public synchronized LongRunningAction startLRA(String baseUri, URI parentLRA, String clientId, Long timelimit) {
@@ -579,16 +554,6 @@ public class LRAService {
                     .build());
         }
 
-        if (haEnabled) {
-            try {
-                if (!transaction.deactivate()) {
-                    LRALogger.logger.warnf("HA joinLRA: deactivate returned false for %s", lra);
-                }
-            } catch (Throwable t) {
-                LRALogger.logger.warnf(t, "HA joinLRA: deactivate threw for %s", lra);
-            }
-        }
-
         recoveryUrl.append(recoveryURI);
 
         return Response.Status.OK.getStatusCode();
@@ -664,10 +629,13 @@ public class LRAService {
      *
      * @param clusterCoordinator the cluster coordinator
      * @param lraActiveCache distributed map backed by the lra-active Infinispan cache
+     * @param lraParticipantsCache distributed map backed by the lra-participants cache
      */
-    public void initializeHA(ClusterCoordinationService clusterCoordinator, Map<String, String> lraActiveCache) {
+    public void initializeHA(ClusterCoordinationService clusterCoordinator,
+            Map<String, String> lraActiveCache, Map<String, String> lraParticipantsCache) {
         this.clusterCoordinator = clusterCoordinator;
         this.lraActiveCache = lraActiveCache;
+        this.lraParticipantsCache = lraParticipantsCache;
         this.haEnabled = true;
 
         // Initialize node ID

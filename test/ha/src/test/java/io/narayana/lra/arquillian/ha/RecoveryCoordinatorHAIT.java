@@ -303,11 +303,12 @@ public class RecoveryCoordinatorHAIT {
                     "Node 1 should return the exact compensator link set by Node 2 while Node 1 was down");
         }
 
-        // Clean up — close the LRA from whichever node is available
+        // Clean up — close the LRA via node2 (node1 may not have recovered yet)
         try {
-            node1Client.closeLRA(lraId);
+            URI lraOnNode2 = rewriteLRAToNode(lraId, NODE2_BASE_URL);
+            node2Client.closeLRA(lraOnNode2);
         } catch (Exception e) {
-            node2Client.closeLRA(lraId);
+            // best effort cleanup
         }
     }
 

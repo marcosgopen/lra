@@ -66,6 +66,11 @@
       <artifactId>lra-proxy-api</artifactId>
       <version>${project.version}</version>
     </dependency>
+    <dependency>
+      <groupId>io.smallrye.config</groupId>
+      <artifactId>smallrye-config-common</artifactId>
+      <version>${version.io.smallrye.smallrye-config}</version>
+    </dependency>
 
     <!-- Use RESTEasy Classic instead of Quarkus REST -->
     <dependency>

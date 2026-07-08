@@ -23,6 +23,7 @@
     <module>basic</module>
     <module>security</module>
     <module>proxy</module>
+    <module>ha</module>
   </modules>
 
   <properties>
@@ -701,6 +702,13 @@
           </plugin>
         </plugins>
       </build>
+    </profile>
+
+    <profile>
+      <id>perf</id>
+      <modules>
+        <module>perf</module>
+      </modules>
     </profile>
 
     <profile>

@@ -8,6 +8,7 @@ package io.narayana.lra.coordinator.infinispan;
 import com.arjuna.ats.arjuna.objectstore.StoreManager;
 import io.narayana.lra.coordinator.internal.ClusterCoordinationService;
 import io.narayana.lra.logging.LRALogger;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
@@ -17,23 +18,40 @@ import javax.naming.NameNotFoundException;
 import javax.naming.NamingException;
 import org.infinispan.Cache;
 import org.infinispan.configuration.cache.CacheMode;
+import org.infinispan.configuration.cache.Configuration;
 import org.infinispan.configuration.cache.ConfigurationBuilder;
 import org.infinispan.configuration.global.GlobalConfigurationBuilder;
+import org.infinispan.conflict.MergePolicy;
 import org.infinispan.manager.DefaultCacheManager;
 import org.infinispan.manager.EmbeddedCacheManager;
+import org.infinispan.partitionhandling.PartitionHandling;
 
 /**
  * CDI configuration for Infinispan in LRA HA mode.
  *
- * Provides the EmbeddedCacheManager and ClusterCoordinationService used by:
- * - InfinispanClusterCoordinator (JGroups-based leader election)
- * - LRAService (distributed caches for cross-node LRA visibility and participant replication)
+ * <p>
+ * Provides the {@link EmbeddedCacheManager} and {@link ClusterCoordinationService}
+ * used by:
+ * </p>
+ * <ul>
+ * <li>{@code InfinispanClusterCoordinator} — JGroups-based leader election</li>
+ * <li>{@code LRAService} — distributed object store for cross-node LRA state replication</li>
+ * </ul>
  *
- * HA persistence uses two Infinispan caches:
- * - lra-active: Map&lt;String, String&gt; — UID → LRA URI (active LRA registry)
- * - lra-participants: Map&lt;String, String&gt; — recovery URL path → participant link header
+ * <p>
+ * HA persistence uses a single Infinispan cache:
+ * </p>
+ * <ul>
+ * <li>{@code lra-objectstore}: {@code Map&lt;String, byte[]&gt;} — Narayana ObjectStore entries,
+ * replicated synchronously across all cluster nodes ({@code REPL_SYNC},
+ * {@code DENY_READ_WRITES} on split, {@code PREFERRED_ALWAYS} merge policy).</li>
+ * </ul>
  *
- * Local filesystem ObjectStore is kept for disaster recovery (full cluster restart).
+ * <p>
+ * In WildFly subsystem mode the cache container is obtained via JNDI
+ * ({@code java:jboss/infinispan/container/lra}); in standalone/Quarkus mode an
+ * embedded {@link DefaultCacheManager} with JGroups transport is started instead.
+ * </p>
  */
 @ApplicationScoped
 public class InfinispanConfiguration {
@@ -42,25 +60,25 @@ public class InfinispanConfiguration {
 
     private EmbeddedCacheManager cacheManager;
     private InfinispanClusterCoordinator coordinator;
-    private boolean initialized = false;
     private boolean managedByContainer = false;
     private String cachedNodeName;
 
     /**
-     * Initializes Infinispan cache manager.
-     * Called automatically by CDI on startup.
+     * Initializes the Infinispan cache manager.
+     *
+     * <p>
+     * Annotated {@link PostConstruct} so that CDI calls this method exactly
+     * once, before the first proxy dispatch, guaranteeing thread-safe
+     * single-initialization without explicit locking.
+     * </p>
      */
+    @PostConstruct
     public void initialize() {
-        if (initialized) {
-            return;
-        }
-
         try {
             // Check if HA mode is enabled
             String haEnabled = System.getProperty("lra.coordinator.ha.enabled", "false");
             if (!"true".equalsIgnoreCase(haEnabled)) {
                 LRALogger.logger.info("LRA HA mode is disabled, Infinispan will not be initialized");
-                initialized = true;
                 return;
             }
 
@@ -76,7 +94,6 @@ public class InfinispanConfiguration {
 
             configureObjectStore();
 
-            initialized = true;
         } catch (Exception e) {
             LRALogger.logger.errorf(e, "Failed to initialize Infinispan for LRA HA mode");
             throw new RuntimeException("Failed to initialize Infinispan", e);
@@ -148,25 +165,14 @@ public class InfinispanConfiguration {
 
         cacheManager = new DefaultCacheManager(globalConfig.build());
 
-        // Define caches used for HA. In WildFly mode these are pre-configured
-        // via the Infinispan subsystem; in embedded mode we define them here.
-        ConfigurationBuilder cacheBuilder = new ConfigurationBuilder();
-        cacheBuilder.clustering().cacheMode(CacheMode.REPL_SYNC)
-                .partitionHandling()
-                .whenSplit(org.infinispan.partitionhandling.PartitionHandling.DENY_READ_WRITES);
-
-        for (String cacheName : new String[] { "lra-active" }) {
-            if (!cacheManager.cacheExists(cacheName)) {
-                cacheManager.defineConfiguration(cacheName, cacheBuilder.build());
-            }
-        }
+        // lra-objectstore is defined (and the ObjectStore is wired) by configureObjectStore().
+        // No other caches are needed in embedded mode.
 
         LRALogger.logger.infof("Infinispan initialized in embedded mode for cluster '%s' with node name '%s'",
                 clusterName, getNodeName());
         LRALogger.logger.infof("Infinispan cluster members: %s", cacheManager.getMembers());
     }
 
-    @SuppressWarnings("unchecked")
     private void configureObjectStore() {
         String cacheName = "lra-objectstore";
 
@@ -174,12 +180,20 @@ public class InfinispanConfiguration {
             ConfigurationBuilder cb = new ConfigurationBuilder();
             cb.clustering().cacheMode(CacheMode.REPL_SYNC)
                     .partitionHandling()
-                    .whenSplit(org.infinispan.partitionhandling.PartitionHandling.DENY_READ_WRITES)
-                    .mergePolicy(org.infinispan.conflict.MergePolicy.PREFERRED_ALWAYS);
+                    .whenSplit(PartitionHandling.DENY_READ_WRITES)
+                    .mergePolicy(MergePolicy.PREFERRED_ALWAYS);
             cacheManager.defineConfiguration(cacheName, cb.build());
         }
 
         Cache<String, byte[]> cache = cacheManager.getCache(cacheName);
+
+        // Log effective cache configuration so operators can verify the deployment.
+        Configuration effectiveCfg = cache.getCacheConfiguration();
+        LRALogger.logger.infof("HA ObjectStore cache '%s' effective config: mode=%s, partitionHandling=%s",
+                cacheName,
+                effectiveCfg.clustering().cacheMode(),
+                effectiveCfg.clustering().partitionHandling().whenSplit());
+
         InfinispanObjectStore.setCache(cache);
 
         InfinispanObjectStore store = new InfinispanObjectStore();
@@ -196,15 +210,12 @@ public class InfinispanConfiguration {
     /**
      * Produces the cache manager bean.
      *
-     * @return the cache manager
+     * @return the cache manager, or {@code null} when HA mode is disabled
      */
     @Produces
     @ApplicationScoped
     @Named("lraCacheManager")
     public EmbeddedCacheManager cacheManager() {
-        if (!initialized) {
-            initialize();
-        }
         return cacheManager;
     }
 
@@ -217,9 +228,6 @@ public class InfinispanConfiguration {
     @Produces
     @ApplicationScoped
     public ClusterCoordinationService clusterCoordinator() {
-        if (!initialized) {
-            initialize();
-        }
         if (cacheManager == null) {
             throw new IllegalStateException("Infinispan cache manager is not available; "
                     + "check that the 'lra' cache container is configured in WildFly");
@@ -232,15 +240,6 @@ public class InfinispanConfiguration {
     }
 
     /**
-     * Checks if Infinispan is initialized.
-     *
-     * @return true if initialized
-     */
-    public boolean isInitialized() {
-        return initialized;
-    }
-
-    /**
      * Gets the node name for this coordinator instance.
      *
      * @return the node name
@@ -249,12 +248,15 @@ public class InfinispanConfiguration {
         if (cachedNodeName != null) {
             return cachedNodeName;
         }
+        // Same three-step derivation as InfinispanObjectStore.getNodeId() so that
+        // the JGroups node name, the persistent-state directory, and the lock owner
+        // identity are always consistent across both classes.
         String nodeName = System.getProperty("lra.coordinator.node.id");
         if (nodeName == null || nodeName.isEmpty()) {
             nodeName = System.getenv("HOSTNAME");
         }
         if (nodeName == null || nodeName.isEmpty()) {
-            nodeName = "lra-coordinator-" + System.currentTimeMillis();
+            nodeName = "lra-coord-" + ProcessHandle.current().pid();
         }
         cachedNodeName = nodeName;
         return nodeName;

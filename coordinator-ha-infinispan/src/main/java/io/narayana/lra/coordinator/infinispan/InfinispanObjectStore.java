@@ -13,9 +13,13 @@ import com.arjuna.ats.arjuna.state.InputObjectState;
 import com.arjuna.ats.arjuna.state.OutputObjectState;
 import com.arjuna.ats.internal.arjuna.common.UidHelper;
 import io.narayana.lra.coordinator.internal.HAMetadataStore;
+import io.narayana.lra.coordinator.internal.StoreUnavailableException;
+import io.narayana.lra.logging.LRALogger;
 import java.io.SyncFailedException;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 import org.infinispan.Cache;
+import org.infinispan.commons.CacheException;
 
 /**
  * ObjectStoreAPI implementation backed by a replicated Infinispan cache.
@@ -41,8 +45,18 @@ import org.infinispan.Cache;
  * to every cluster node. Any coordinator can {@code activate()} any LRA by
  * reading from its local cache replica.
  * </p>
+ *
+ * <p>
+ * Infinispan cache failures ({@link CacheException}, which includes
+ * {@code AvailabilityException} for degraded partitions) are converted to
+ * {@link StoreUnavailableException} so callers can distinguish a
+ * transient 503-class failure from a hard 500-class store error.
+ * </p>
  */
 public class InfinispanObjectStore implements ObjectStoreAPI, HAMetadataStore {
+
+    /** Minimum TTL for distributed locks, in seconds. */
+    private static final int LOCK_TTL_MIN_SECONDS = 10;
 
     private static volatile Cache<String, byte[]> infinispanCache;
 
@@ -62,12 +76,53 @@ public class InfinispanObjectStore implements ObjectStoreAPI, HAMetadataStore {
         return type + "/" + uid.fileStringForm();
     }
 
+    /**
+     * Returns a stable, cluster-unique identifier for this coordinator node.
+     *
+     * <p>
+     * Resolution order:
+     * </p>
+     * <ol>
+     * <li>System property {@code lra.coordinator.node.id}</li>
+     * <li>Environment variable {@code HOSTNAME}</li>
+     * <li>{@code "lra-coord-" + current PID} (always available on Java 9+)</li>
+     * </ol>
+     */
+    static String getNodeId() {
+        String id = System.getProperty("lra.coordinator.node.id");
+        if (id != null && !id.isEmpty()) {
+            return id;
+        }
+        id = System.getenv("HOSTNAME");
+        if (id != null && !id.isEmpty()) {
+            return id;
+        }
+        return "lra-coord-" + ProcessHandle.current().pid();
+    }
+
+    /**
+     * Returns the lock TTL in seconds, reading
+     * {@code lra.coordinator.lock.ttl.seconds} (default 30, minimum 10).
+     */
+    static int getLockTtlSeconds() {
+        int ttl;
+        try {
+            ttl = Integer.parseInt(
+                    System.getProperty("lra.coordinator.lock.ttl.seconds", "30"));
+        } catch (NumberFormatException e) {
+            ttl = 30;
+        }
+        return Math.max(ttl, LOCK_TTL_MIN_SECONDS);
+    }
+
     @Override
     public boolean write_committed(Uid uid, String type, OutputObjectState state)
             throws ObjectStoreException {
         try {
             cache().put(key(uid, type), state.buffer());
             return true;
+        } catch (CacheException e) {
+            throw new StoreUnavailableException("write_committed – store unavailable", e);
         } catch (Exception e) {
             throw new ObjectStoreException(e);
         }
@@ -79,18 +134,30 @@ public class InfinispanObjectStore implements ObjectStoreAPI, HAMetadataStore {
      * already holds the lock, returns false.
      *
      * <p>
+     * The lock entry has a TTL driven by
+     * {@code lra.coordinator.lock.ttl.seconds} (default 30 s, minimum 10 s)
+     * so stale locks from crashed nodes are automatically expelled.
+     * </p>
+     *
+     * <p>
      * The lock is released by calling {@link #releaseLock(Uid)}.
      * </p>
      *
      * @return true if the lock was acquired, false if another node holds it
+     * @throws StoreUnavailableException if the cache is in a degraded partition
+     * @throws ObjectStoreException for any other store failure
      */
+    @Override
     public boolean tryLock(Uid uid) throws ObjectStoreException {
         try {
             String lockKey = "lock/" + uid.fileStringForm();
             byte[] nodeValue = getNodeId().getBytes(StandardCharsets.UTF_8);
+            // TTL is configurable via lra.coordinator.lock.ttl.seconds (min 10 s).
             byte[] existing = cache().putIfAbsent(lockKey, nodeValue,
-                    30, java.util.concurrent.TimeUnit.SECONDS);
+                    getLockTtlSeconds(), TimeUnit.SECONDS);
             return existing == null;
+        } catch (CacheException e) {
+            throw new StoreUnavailableException("tryLock – store unavailable", e);
         } catch (Exception e) {
             throw new ObjectStoreException(e);
         }
@@ -98,20 +165,22 @@ public class InfinispanObjectStore implements ObjectStoreAPI, HAMetadataStore {
 
     /**
      * Releases the lock acquired by {@link #tryLock(Uid)}.
-     * Only removes the lock if this node owns it.
+     * Only removes the lock if this node owns it (conditional remove).
+     *
+     * @throws StoreUnavailableException if the cache is in a degraded partition
+     * @throws ObjectStoreException for any other store failure
      */
+    @Override
     public void releaseLock(Uid uid) throws ObjectStoreException {
         try {
             String lockKey = "lock/" + uid.fileStringForm();
             byte[] nodeValue = getNodeId().getBytes(StandardCharsets.UTF_8);
             cache().remove(lockKey, nodeValue);
+        } catch (CacheException e) {
+            throw new StoreUnavailableException("releaseLock – store unavailable", e);
         } catch (Exception e) {
             throw new ObjectStoreException(e);
         }
-    }
-
-    private static String getNodeId() {
-        return System.getProperty("lra.coordinator.node.id", "unknown");
     }
 
     @Override
@@ -123,6 +192,8 @@ public class InfinispanObjectStore implements ObjectStoreAPI, HAMetadataStore {
                 return null;
             }
             return new InputObjectState(uid, type, data);
+        } catch (CacheException e) {
+            throw new StoreUnavailableException("read_committed – store unavailable", e);
         } catch (Exception e) {
             throw new ObjectStoreException(e);
         }
@@ -133,24 +204,50 @@ public class InfinispanObjectStore implements ObjectStoreAPI, HAMetadataStore {
             throws ObjectStoreException {
         try {
             return cache().remove(key(uid, type)) != null;
+        } catch (CacheException e) {
+            throw new StoreUnavailableException("remove_committed – store unavailable", e);
         } catch (Exception e) {
             throw new ObjectStoreException(e);
         }
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>
+     * Iterates a point-in-time snapshot of the cache key set and returns every
+     * UID whose key starts with the given type prefix. Taking a snapshot avoids
+     * {@link java.util.ConcurrentModificationException} if concurrent writes
+     * arrive during a recovery enumeration.
+     * </p>
+     *
+     * <p>
+     * The {@code matchState} parameter is accepted for API compatibility but
+     * intentionally not filtered on: the backing {@code REPL_SYNC} cache has
+     * always-committed semantics — every entry is considered committed. A DEBUG
+     * log is emitted when a caller passes a state other than
+     * {@link StateStatus#OS_UNKNOWN} so that unexpected usage is visible.
+     * </p>
+     */
     @Override
     public boolean allObjUids(String type, InputObjectState foundInstances, int matchState)
             throws ObjectStoreException {
+        if (matchState != StateStatus.OS_UNKNOWN) {
+            LRALogger.logger.debugf(
+                    "InfinispanObjectStore.allObjUids: matchState=%d ignored — "
+                            + "always-committed semantics; all entries returned",
+                    matchState);
+        }
         try {
             String prefix = type + "/";
             OutputObjectState buffer = new OutputObjectState();
 
-            for (String k : cache().keySet()) {
+            // Snapshot the key set to avoid ConcurrentModificationException
+            // if writes arrive concurrently during a recovery scan.
+            for (String k : new java.util.HashSet<>(cache().keySet())) {
                 if (k.startsWith(prefix)) {
+                    // The prefix check already excludes lock/ and failed/ namespaces.
                     String uidStr = k.substring(prefix.length());
-                    if (uidStr.contains("/")) {
-                        continue;
-                    }
                     UidHelper.packInto(new Uid(uidStr), buffer);
                 }
             }
@@ -158,6 +255,8 @@ public class InfinispanObjectStore implements ObjectStoreAPI, HAMetadataStore {
             UidHelper.packInto(Uid.nullUid(), buffer);
             foundInstances.setBuffer(buffer.buffer());
             return true;
+        } catch (CacheException e) {
+            throw new StoreUnavailableException("allObjUids – store unavailable", e);
         } catch (Exception e) {
             throw new ObjectStoreException(e);
         }
@@ -175,9 +274,10 @@ public class InfinispanObjectStore implements ObjectStoreAPI, HAMetadataStore {
             OutputObjectState buffer = new OutputObjectState();
             java.util.Set<String> types = new java.util.HashSet<>();
 
-            for (String k : cache().keySet()) {
-                if (k.startsWith("lock/")) {
-                    continue; // distributed lock key, not a transaction type
+            // Snapshot avoids ConcurrentModificationException during concurrent writes.
+            for (String k : new java.util.HashSet<>(cache().keySet())) {
+                if (k.startsWith("lock/") || k.startsWith("failed/")) {
+                    continue; // skip distributed-lock and failed-LRA sentinel keys
                 }
                 int lastSlash = k.lastIndexOf('/');
                 if (lastSlash > 0) {
@@ -191,6 +291,8 @@ public class InfinispanObjectStore implements ObjectStoreAPI, HAMetadataStore {
             buffer.packString("");
             foundTypes.setBuffer(buffer.buffer());
             return true;
+        } catch (CacheException e) {
+            throw new StoreUnavailableException("allTypes – store unavailable", e);
         } catch (Exception e) {
             throw new ObjectStoreException(e);
         }
@@ -202,6 +304,8 @@ public class InfinispanObjectStore implements ObjectStoreAPI, HAMetadataStore {
             return cache().containsKey(key(uid, type))
                     ? StateStatus.OS_COMMITTED
                     : StateStatus.OS_UNKNOWN;
+        } catch (CacheException e) {
+            throw new StoreUnavailableException("currentState – store unavailable", e);
         } catch (Exception e) {
             throw new ObjectStoreException(e);
         }

@@ -52,7 +52,6 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
-import jakarta.ws.rs.ServiceUnavailableException;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.client.Client;
 import jakarta.ws.rs.client.Entity;
@@ -619,8 +618,12 @@ public class Coordinator extends Application {
 
         try {
             status = lraService.joinLRA(recoveryUrl, lraId, timeLimit, null, linkHeader, recoveryUrlBase, userData, version);
-        } catch (ServiceUnavailableException e) {
-            return Response.status(Response.Status.SERVICE_UNAVAILABLE.getStatusCode()).entity(e.getMessage()).build();
+        } catch (WebApplicationException e) {
+            LRALogger.logger.debug(e.getMessage());
+            return Response.status(e.getResponse().getStatus())
+                    .entity(e.getMessage())
+                    .header(NARAYANA_LRA_API_VERSION_HEADER_NAME, version)
+                    .build();
         }
 
         if (acceptMediaType.equals(MediaType.APPLICATION_JSON)) {

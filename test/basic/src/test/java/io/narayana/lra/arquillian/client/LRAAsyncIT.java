@@ -63,8 +63,8 @@ public class LRAAsyncIT extends TestBase {
 
     @AfterEach
     @Override
-    public void after() {
-        super.after();
+    public void after(TestInfo testInfo) {
+        super.after(testInfo);
         executorService.shutdown();
     }
 

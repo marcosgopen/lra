@@ -127,43 +127,47 @@ public class CoordinatorApiIT extends TestBase {
         URI lraId1 = lraClient.startLRA(clientId1);
         URI lraId2 = lraClient.startLRA(lraId1, clientId2, 0L, null);
         lrasToAfterFinish.add(lraId1); // lraId2 is nested and will be closed in regard to lraId1
+        try {
+            List<LRAData> data;
+            try (Response response = client.target(coordinatorUrl)
+                    .request().header(LRA_API_VERSION_HEADER_NAME, version).get()) {
+                Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
+                        "Expected that the call succeeds, GET/200.");
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Provided API header, expected that one is returned");
+                data = response.readEntity(new GenericType<>() {
+                });
+            }
 
-        List<LRAData> data;
-        try (Response response = client.target(coordinatorUrl)
-                .request().header(LRA_API_VERSION_HEADER_NAME, version).get()) {
-            Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
-                    "Expected that the call succeeds, GET/200.");
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Provided API header, expected that one is returned");
-            data = response.readEntity(new GenericType<>() {
-            });
+            Optional<LRAData> lraTopOptional = data.stream().filter(record -> record.getLraId().equals(lraId1)).findFirst();
+            Assertions.assertTrue(lraTopOptional.isPresent(),
+                    "Expected to find the top-level LRA id " + lraId1 + " from REST get all call");
+            LRAData lraTop = lraTopOptional.get();
+            Optional<LRAData> lraNestedOptional = data.stream().filter(record -> record.getLraId().equals(lraId2)).findFirst();
+            Assertions.assertTrue(lraNestedOptional.isPresent(),
+                    "Expected to find the nested LRA id " + lraId2 + " from REST get all call");
+            LRAData lraNested = lraNestedOptional.get();
+
+            Assertions.assertEquals(LRAStatus.Active, lraTop.getStatus(),
+                    "Expected top-level LRA '" + lraTop + "'  being active");
+            Assertions.assertEquals(Status.NO_CONTENT.getStatusCode(), lraTop.getHttpStatus(),
+                    "Expected top-level LRA '" + lraTop + "'  being active, HTTP status 204.");
+            Assertions.assertFalse(lraTop.isRecovering(), "Expected top-level LRA '" + lraTop + "' not being recovering");
+            Assertions.assertTrue(lraTop.isTopLevel(), "Expected top-level LRA '" + lraTop + "' to be top level");
+            assertThat("Expected the start time of top-level LRA '" + lraTop + "' is after the test start time",
+                    beforeTime, lessThan(lraTop.getStartTime()));
+
+            Assertions.assertEquals(LRAStatus.Active, lraNested.getStatus(),
+                    "Expected nested LRA '" + lraNested + "'  being active");
+            Assertions.assertEquals(Status.NO_CONTENT.getStatusCode(), lraNested.getHttpStatus(),
+                    "Expected nested LRA '" + lraNested + "'  being active, HTTP status 204.");
+            Assertions.assertFalse(lraNested.isRecovering(), "Expected nested LRA '" + lraNested + "' not being recovering");
+            Assertions.assertFalse(lraNested.isTopLevel(), "Expected nested LRA '" + lraNested + "' to be nested");
+            assertThat("Expected the start time of nested LRA '" + lraNested + "' is after the test start time",
+                    beforeTime, lessThan(lraNested.getStartTime()));
+        } finally {
+            lraClient.cancelLRA(lraId1);
         }
-
-        Optional<LRAData> lraTopOptional = data.stream().filter(record -> record.getLraId().equals(lraId1)).findFirst();
-        Assertions.assertTrue(lraTopOptional.isPresent(),
-                "Expected to find the top-level LRA id " + lraId1 + " from REST get all call");
-        LRAData lraTop = lraTopOptional.get();
-        Optional<LRAData> lraNestedOptional = data.stream().filter(record -> record.getLraId().equals(lraId2)).findFirst();
-        Assertions.assertTrue(lraNestedOptional.isPresent(),
-                "Expected to find the nested LRA id " + lraId2 + " from REST get all call");
-        LRAData lraNested = lraNestedOptional.get();
-
-        Assertions.assertEquals(LRAStatus.Active, lraTop.getStatus(), "Expected top-level LRA '" + lraTop + "'  being active");
-        Assertions.assertEquals(Status.NO_CONTENT.getStatusCode(), lraTop.getHttpStatus(),
-                "Expected top-level LRA '" + lraTop + "'  being active, HTTP status 204.");
-        Assertions.assertFalse(lraTop.isRecovering(), "Expected top-level LRA '" + lraTop + "' not being recovering");
-        Assertions.assertTrue(lraTop.isTopLevel(), "Expected top-level LRA '" + lraTop + "' to be top level");
-        assertThat("Expected the start time of top-level LRA '" + lraTop + "' is after the test start time",
-                beforeTime, lessThan(lraTop.getStartTime()));
-
-        Assertions.assertEquals(LRAStatus.Active, lraNested.getStatus(),
-                "Expected nested LRA '" + lraNested + "'  being active");
-        Assertions.assertEquals(Status.NO_CONTENT.getStatusCode(), lraNested.getHttpStatus(),
-                "Expected nested LRA '" + lraNested + "'  being active, HTTP status 204.");
-        Assertions.assertFalse(lraNested.isRecovering(), "Expected nested LRA '" + lraNested + "' not being recovering");
-        Assertions.assertFalse(lraNested.isTopLevel(), "Expected nested LRA '" + lraNested + "' to be nested");
-        assertThat("Expected the start time of nested LRA '" + lraNested + "' is after the test start time",
-                beforeTime, lessThan(lraNested.getStartTime()));
     }
 
     /**
@@ -179,31 +183,35 @@ public class CoordinatorApiIT extends TestBase {
         URI lraId1 = lraClient.startLRA(clientId1);
         URI lraId2 = lraClient.startLRA(lraId1, clientId2, 0L, null);
         lrasToAfterFinish.add(lraId1);
-        lraClient.closeLRA(lraId2);
+        try {
+            lraClient.closeLRA(lraId2);
 
-        try (Response response = client.target(coordinatorUrl).request()
-                .header(LRA_API_VERSION_HEADER_NAME, version).get()) {
-            Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
-                    "Expected that the call succeeds, GET/200.");
-            List<LRAData> data = response.readEntity(new GenericType<>() {
-            });
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Expected API header to be returned with the version provided in request");
-            Collection<URI> returnedLraIds = data.stream().map(LRAData::getLraId).collect(Collectors.toList());
-            assertThat("Expected the coordinator returns the first started and second closed LRA",
-                    returnedLraIds, hasItems(lraId1, lraId2));
-        }
-        try (Response response = client.target(coordinatorUrl)
-                .queryParam(STATUS_PARAM_NAME, "Active").request().get()) {
-            Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
-                    "Expected that the call succeeds, GET/200.");
-            List<LRAData> data = response.readEntity(new GenericType<>() {
-            });
-            Collection<URI> returnedLraIds = data.stream().map(LRAData::getLraId).collect(Collectors.toList());
-            assertThat("Expected the coordinator returns the first started top-level LRA",
-                    returnedLraIds, hasItem(lraId1));
-            assertThat("Expected the coordinator filtered out the non-active nested LRA",
-                    returnedLraIds, not(hasItem(lraId2)));
+            try (Response response = client.target(coordinatorUrl).request()
+                    .header(LRA_API_VERSION_HEADER_NAME, version).get()) {
+                Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
+                        "Expected that the call succeeds, GET/200.");
+                List<LRAData> data = response.readEntity(new GenericType<>() {
+                });
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Expected API header to be returned with the version provided in request");
+                Collection<URI> returnedLraIds = data.stream().map(LRAData::getLraId).collect(Collectors.toList());
+                assertThat("Expected the coordinator returns the first started and second closed LRA",
+                        returnedLraIds, hasItems(lraId1, lraId2));
+            }
+            try (Response response = client.target(coordinatorUrl)
+                    .queryParam(STATUS_PARAM_NAME, "Active").request().get()) {
+                Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
+                        "Expected that the call succeeds, GET/200.");
+                List<LRAData> data = response.readEntity(new GenericType<>() {
+                });
+                Collection<URI> returnedLraIds = data.stream().map(LRAData::getLraId).collect(Collectors.toList());
+                assertThat("Expected the coordinator returns the first started top-level LRA",
+                        returnedLraIds, hasItem(lraId1));
+                assertThat("Expected the coordinator filtered out the non-active nested LRA",
+                        returnedLraIds, not(hasItem(lraId2)));
+            }
+        } finally {
+            lraClient.cancelLRA(lraId1);
         }
     }
 
@@ -238,16 +246,20 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        try (Response response = client.target(coordinatorUrl).path(encodedLraId).path("status")
-                .request().header(LRA_API_VERSION_HEADER_NAME, version).get()) {
-            Assertions.assertEquals(Status.OK.getStatusCode(),
-                    response.getStatus(),
-                    "Expected that the get status call succeeds, GET/200.");
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Expected API header to be returned with the version provided in request");
-            Assertions.assertEquals("Active", response.readEntity(String.class), "Expected the returned LRA status is Active");
+        try {
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            try (Response response = client.target(coordinatorUrl).path(encodedLraId).path("status")
+                    .request().header(LRA_API_VERSION_HEADER_NAME, version).get()) {
+                Assertions.assertEquals(Status.OK.getStatusCode(),
+                        response.getStatus(),
+                        "Expected that the get status call succeeds, GET/200.");
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Expected API header to be returned with the version provided in request");
+                Assertions.assertEquals("Active", response.readEntity(String.class),
+                        "Expected the returned LRA status is Active");
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -290,22 +302,26 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        try (Response response = client.target(coordinatorUrl).path(encodedLraId)
-                .request().header(LRA_API_VERSION_HEADER_NAME, version).get()) {
-            Assertions.assertEquals(Status.OK.getStatusCode(),
-                    response.getStatus(),
-                    "Expected that the get status call succeeds, GET/200.");
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Expected API header to be returned with the version provided in request");
-            LRAData data = response.readEntity(new GenericType<>() {
-            });
-            Assertions.assertEquals(lraId, data.getLraId(), "Expected the returned LRA to be the one that was started by test");
-            Assertions.assertEquals(LRAStatus.Active, data.getStatus(), "Expected the returned LRA being Active");
-            Assertions.assertTrue(data.isTopLevel(), "Expected the returned LRA is top-level");
-            Assertions.assertEquals(Status.NO_CONTENT.getStatusCode(), data.getHttpStatus(),
-                    "Expected the returned LRA get HTTP status as active, HTTP status 204.");
+        try {
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            try (Response response = client.target(coordinatorUrl).path(encodedLraId)
+                    .request().header(LRA_API_VERSION_HEADER_NAME, version).get()) {
+                Assertions.assertEquals(Status.OK.getStatusCode(),
+                        response.getStatus(),
+                        "Expected that the get status call succeeds, GET/200.");
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Expected API header to be returned with the version provided in request");
+                LRAData data = response.readEntity(new GenericType<>() {
+                });
+                Assertions.assertEquals(lraId, data.getLraId(),
+                        "Expected the returned LRA to be the one that was started by test");
+                Assertions.assertEquals(LRAStatus.Active, data.getStatus(), "Expected the returned LRA being Active");
+                Assertions.assertTrue(data.isTopLevel(), "Expected the returned LRA is top-level");
+                Assertions.assertEquals(Status.NO_CONTENT.getStatusCode(), data.getHttpStatus(),
+                        "Expected the returned LRA get HTTP status as active, HTTP status 204.");
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -551,31 +567,34 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
+        try {
+            Optional<LRAData> data = lraClient.getAllLRAs().stream().filter(l -> l.getLraId().equals(lraId)).findFirst();
+            Assertions.assertTrue(data.isPresent(), "Expected the started LRA will be retrieved by LRA client get");
+            Assertions.assertEquals(0L, data.get().getFinishTime(), "Expected not defined finish time");
 
-        Optional<LRAData> data = lraClient.getAllLRAs().stream().filter(l -> l.getLraId().equals(lraId)).findFirst();
-        Assertions.assertTrue(data.isPresent(), "Expected the started LRA will be retrieved by LRA client get");
-        Assertions.assertEquals(0L, data.get().getFinishTime(), "Expected not defined finish time");
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLraId)
+                    .path("renew")
+                    .queryParam(TIME_LIMIT_PARAM_NAME, Integer.MAX_VALUE)
+                    .request()
+                    .header(LRA_API_VERSION_HEADER_NAME, version)
+                    .put(null)) {
+                Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
+                        "Expected time limit request to succeed, PUT/200 is expected.");
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Expected API header to be returned with the version provided in request");
+                assertThat("Expected the found LRA id is returned",
+                        response.readEntity(String.class), containsString(lraId.toString()));
+            }
 
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLraId)
-                .path("renew")
-                .queryParam(TIME_LIMIT_PARAM_NAME, Integer.MAX_VALUE)
-                .request()
-                .header(LRA_API_VERSION_HEADER_NAME, version)
-                .put(null)) {
-            Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
-                    "Expected time limit request to succeed, PUT/200 is expected.");
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Expected API header to be returned with the version provided in request");
-            assertThat("Expected the found LRA id is returned",
-                    response.readEntity(String.class), containsString(lraId.toString()));
+            data = lraClient.getAllLRAs().stream().filter(l -> l.getLraId().equals(lraId)).findFirst();
+            Assertions.assertTrue(data.isPresent(), "Expected the started LRA will be retrieved by LRA client get");
+            assertThat("Expected finish time to not be 0 as time limit was defined",
+                    data.get().getFinishTime(), greaterThan(0L));
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
-
-        data = lraClient.getAllLRAs().stream().filter(l -> l.getLraId().equals(lraId)).findFirst();
-        Assertions.assertTrue(data.isPresent(), "Expected the started LRA will be retrieved by LRA client get");
-        assertThat("Expected finish time to not be 0 as time limit was defined",
-                data.get().getFinishTime(), greaterThan(0L));
     }
 
     /**
@@ -614,29 +633,32 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLraId)
-                .request()
-                .header(LRA_API_VERSION_HEADER_NAME, version)
-                // the request body should correspond to a valid compensator or be empty
-                .put(Entity.text(""))) {
-            Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
-                    "Expected joining LRA succeeded, PUT/200 is expected.");
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Expected API header to be returned with the version provided in request");
-            String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
-            String recoveryUrlBody = response.readEntity(String.class);
-            URI recoveryUrlLocation = response.getLocation();
-            Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
-                    "Expecting returned body and recovery header have got the same content");
-            Assertions.assertEquals(recoveryUrlBody, recoveryUrlLocation.toString(),
-                    "Expecting returned body and location have got the same content");
-            assertThat("Expected returned message contains the sub-path of LRA recovery URL",
-                    recoveryUrlBody, containsString("lra-coordinator/recovery"));
-            assertThat("Expected returned message contains the LRA id",
-                    recoveryUrlBody, containsString(encodedLraId));
+        try {
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLraId)
+                    .request()
+                    .header(LRA_API_VERSION_HEADER_NAME, version)
+                    // the request body should correspond to a valid compensator or be empty
+                    .put(Entity.text(""))) {
+                Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
+                        "Expected joining LRA succeeded, PUT/200 is expected.");
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Expected API header to be returned with the version provided in request");
+                String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
+                String recoveryUrlBody = response.readEntity(String.class);
+                URI recoveryUrlLocation = response.getLocation();
+                Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
+                        "Expecting returned body and recovery header have got the same content");
+                Assertions.assertEquals(recoveryUrlBody, recoveryUrlLocation.toString(),
+                        "Expecting returned body and location have got the same content");
+                assertThat("Expected returned message contains the sub-path of LRA recovery URL",
+                        recoveryUrlBody, containsString("lra-coordinator/recovery"));
+                assertThat("Expected returned message contains the LRA id",
+                        recoveryUrlBody, containsString(encodedLraId));
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -648,29 +670,33 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8); // must be valid
+        try {
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8); // must be valid
 
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLraId)
-                .request()
-                .header(LRA_API_VERSION_HEADER_NAME, version)
-                // the request body should correspond to a valid compensator or be empty
-                .put(Entity.text(""))) {
-            Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
-                    "Expected joining LRA succeeded, PUT/200 is expected.");
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Expected API header to be returned with the version provided in request");
-            String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
-            String recoveryUrlBody = response.readEntity(String.class);
-            URI recoveryUrlLocation = response.getLocation();
-            Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
-                    "Expecting returned body and recovery header have got the same content");
-            Assertions.assertEquals(recoveryUrlBody, recoveryUrlLocation.toString(),
-                    "Expecting returned body and location have got the same content");
-            assertThat("Expected returned message contains the sub-path of LRA recovery URL",
-                    recoveryUrlBody, containsString("lra-coordinator/recovery"));
-            assertThat("Expected returned message contains the LRA id",
-                    recoveryUrlBody, containsString(LRAConstants.getLRAUid(lraId)));
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLraId)
+                    .request()
+                    .header(LRA_API_VERSION_HEADER_NAME, version)
+                    // the request body should correspond to a valid compensator or be empty
+                    .put(Entity.text(""))) {
+                Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
+                        "Expected joining LRA succeeded, PUT/200 is expected.");
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Expected API header to be returned with the version provided in request");
+                String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
+                String recoveryUrlBody = response.readEntity(String.class);
+                URI recoveryUrlLocation = response.getLocation();
+                Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
+                        "Expecting returned body and recovery header have got the same content");
+                Assertions.assertEquals(recoveryUrlBody, recoveryUrlLocation.toString(),
+                        "Expecting returned body and location have got the same content");
+                assertThat("Expected returned message contains the sub-path of LRA recovery URL",
+                        recoveryUrlBody, containsString("lra-coordinator/recovery"));
+                assertThat("Expected returned message contains the LRA id",
+                        recoveryUrlBody, containsString(LRAConstants.getLRAUid(lraId)));
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -684,29 +710,32 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLraId)
-                .request()
-                .header(LRA_API_VERSION_HEADER_NAME, version)
-                .header("Link", "http://compensator.url:8080")
-                .put(null)) {
-            Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
-                    "Expected joining LRA succeeded, PUT/200 is expected.");
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Expected API header to be returned with the version provided in request");
-            String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
-            String recoveryUrlBody = response.readEntity(String.class);
-            URI recoveryUrlLocation = response.getLocation();
-            Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
-                    "Expecting returned body and recovery header have got the same content");
-            Assertions.assertEquals(recoveryUrlBody, recoveryUrlLocation.toString(),
-                    "Expecting returned body and location have got the same content");
-            assertThat("Expected returned message contains the sub-path of LRA recovery URL",
-                    recoveryUrlBody, containsString("lra-coordinator/recovery"));
-            assertThat("Expected returned message contains the LRA id",
-                    recoveryUrlBody, containsString(encodedLraId));
+        try {
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLraId)
+                    .request()
+                    .header(LRA_API_VERSION_HEADER_NAME, version)
+                    .header("Link", "http://compensator.url:8080")
+                    .put(null)) {
+                Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
+                        "Expected joining LRA succeeded, PUT/200 is expected.");
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Expected API header to be returned with the version provided in request");
+                String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
+                String recoveryUrlBody = response.readEntity(String.class);
+                URI recoveryUrlLocation = response.getLocation();
+                Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
+                        "Expecting returned body and recovery header have got the same content");
+                Assertions.assertEquals(recoveryUrlBody, recoveryUrlLocation.toString(),
+                        "Expecting returned body and location have got the same content");
+                assertThat("Expected returned message contains the sub-path of LRA recovery URL",
+                        recoveryUrlBody, containsString("lra-coordinator/recovery"));
+                assertThat("Expected returned message contains the LRA id",
+                        recoveryUrlBody, containsString(encodedLraId));
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -716,29 +745,32 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLraId)
-                .request()
-                .header(LRA_API_VERSION_HEADER_NAME, version)
-                .header("Link", "http://compensator.url:8080")
-                .put(null)) {
-            Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
-                    "Expected joining LRA succeeded, PUT/200 is expected.");
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Expected API header to be returned with the version provided in request");
-            String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
-            String recoveryUrlBody = response.readEntity(String.class);
-            URI recoveryUrlLocation = response.getLocation();
-            Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
-                    "Expecting returned body and recovery header have got the same content");
-            Assertions.assertEquals(recoveryUrlBody, recoveryUrlLocation.toString(),
-                    "Expecting returned body and location have got the same content");
-            assertThat("Expected returned message contains the sub-path of LRA recovery URL",
-                    recoveryUrlBody, containsString("lra-coordinator/recovery"));
-            assertThat("Expected returned message contains the LRA id",
-                    recoveryUrlBody, containsString(LRAConstants.getLRAUid(lraId)));
+        try {
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLraId)
+                    .request()
+                    .header(LRA_API_VERSION_HEADER_NAME, version)
+                    .header("Link", "http://compensator.url:8080")
+                    .put(null)) {
+                Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
+                        "Expected joining LRA succeeded, PUT/200 is expected.");
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Expected API header to be returned with the version provided in request");
+                String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
+                String recoveryUrlBody = response.readEntity(String.class);
+                URI recoveryUrlLocation = response.getLocation();
+                Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
+                        "Expecting returned body and recovery header have got the same content");
+                Assertions.assertEquals(recoveryUrlBody, recoveryUrlLocation.toString(),
+                        "Expecting returned body and location have got the same content");
+                assertThat("Expected returned message contains the sub-path of LRA recovery URL",
+                        recoveryUrlBody, containsString("lra-coordinator/recovery"));
+                assertThat("Expected returned message contains the LRA id",
+                        recoveryUrlBody, containsString(LRAConstants.getLRAUid(lraId)));
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -752,25 +784,28 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        Link link = Link.fromUri(getNoopURL()).rel("compensate").build();
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLraId)
-                .request()
-                .header("Link", link.toString())
-                .put(null)) {
-            Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
-                    "Expected joining LRA succeeded, PUT/200 is expected.");
-            Assertions.assertTrue(
-                    response.getHeaders().containsKey(LRA_API_VERSION_HEADER_NAME),
-                    "API version header is expected on response despite no API version header was provided on request");
-            String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
-            String recoveryUrlBody = response.readEntity(String.class);
-            Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
-                    "Expecting returned body and recovery header have got the same content");
-            assertThat("Expected returned message contains the sub-path of LRA recovery URL",
-                    recoveryUrlBody, containsString("lra-coordinator/recovery"));
+        try {
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            Link link = Link.fromUri(getNoopURL()).rel("compensate").build();
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLraId)
+                    .request()
+                    .header("Link", link.toString())
+                    .put(null)) {
+                Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
+                        "Expected joining LRA succeeded, PUT/200 is expected.");
+                Assertions.assertTrue(
+                        response.getHeaders().containsKey(LRA_API_VERSION_HEADER_NAME),
+                        "API version header is expected on response despite no API version header was provided on request");
+                String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
+                String recoveryUrlBody = response.readEntity(String.class);
+                Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
+                        "Expecting returned body and recovery header have got the same content");
+                assertThat("Expected returned message contains the sub-path of LRA recovery URL",
+                        recoveryUrlBody, containsString("lra-coordinator/recovery"));
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -784,24 +819,27 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        Link afterLink = Link.fromUri(getNoopURL()).rel("after").build();
-        Link unknownLink = Link.fromUri("http://unknow.url:8080").rel("unknown").build();
-        String linkList = afterLink.toString() + "," + unknownLink.toString();
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLraId)
-                .request()
-                .header("Link", linkList)
-                .put(null)) {
-            Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
-                    "Expected joining LRA succeeded, PUT/200 is expected.");
-            String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
-            String recoveryUrlBody = response.readEntity(String.class);
-            Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
-                    "Expecting returned body and recovery header have got the same content");
-            assertThat("Expected returned message contains the sub-path of LRA recovery URL",
-                    URLDecoder.decode(recoveryUrlBody, StandardCharsets.UTF_8), containsString("lra-coordinator/recovery"));
+        try {
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            Link afterLink = Link.fromUri(getNoopURL()).rel("after").build();
+            Link unknownLink = Link.fromUri("http://unknow.url:8080").rel("unknown").build();
+            String linkList = afterLink.toString() + "," + unknownLink.toString();
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLraId)
+                    .request()
+                    .header("Link", linkList)
+                    .put(null)) {
+                Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
+                        "Expected joining LRA succeeded, PUT/200 is expected.");
+                String recoveryHeaderUrlMessage = response.getHeaderString(RECOVERY_HEADER_NAME);
+                String recoveryUrlBody = response.readEntity(String.class);
+                Assertions.assertEquals(recoveryUrlBody, recoveryHeaderUrlMessage,
+                        "Expecting returned body and recovery header have got the same content");
+                assertThat("Expected returned message contains the sub-path of LRA recovery URL",
+                        URLDecoder.decode(recoveryUrlBody, StandardCharsets.UTF_8), containsString("lra-coordinator/recovery"));
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -819,14 +857,18 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLraId)
-                .request()
-                .header("Link", "<link>;rel=myrel;<wrong>")
-                .put(null)) {
-            Assertions.assertEquals(Status.INTERNAL_SERVER_ERROR.getStatusCode(), response.getStatus(),
-                    "Expected the join failing, PUT/500 is expected.");
+        try {
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLraId)
+                    .request()
+                    .header("Link", "<link>;rel=myrel;<wrong>")
+                    .put(null)) {
+                Assertions.assertEquals(Status.INTERNAL_SERVER_ERROR.getStatusCode(), response.getStatus(),
+                        "Expected the join failing, PUT/500 is expected.");
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -864,18 +906,22 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLraId)
-                .request()
-                .header(LRA_API_VERSION_HEADER_NAME, version)
-                .put(Entity.text("this-is-not-a-valid-url::::"))) {
-            Assertions.assertEquals(Status.PRECONDITION_FAILED.getStatusCode(), response.getStatus(),
-                    "Expected the join failing on wrong compensator data format, PUT/412 is expected.");
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Expected API header to be returned with the version provided in request");
-            assertThat("Expected error message to contain the LRA id where enlist failed",
-                    response.readEntity(String.class), containsString(lraId.toString()));
+        try {
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLraId)
+                    .request()
+                    .header(LRA_API_VERSION_HEADER_NAME, version)
+                    .put(Entity.text("this-is-not-a-valid-url::::"))) {
+                Assertions.assertEquals(Status.PRECONDITION_FAILED.getStatusCode(), response.getStatus(),
+                        "Expected the join failing on wrong compensator data format, PUT/412 is expected.");
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Expected API header to be returned with the version provided in request");
+                assertThat("Expected error message to contain the LRA id where enlist failed",
+                        response.readEntity(String.class), containsString(lraId.toString()));
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -889,20 +935,23 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-
-        String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        Link link = Link.fromUri(getNoopURL()).rel("complete").build();
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLraId)
-                .request()
-                .header(LRA_API_VERSION_HEADER_NAME, version)
-                .header("Link", link.toString())
-                .put(null)) {
-            Assertions.assertEquals(Status.BAD_REQUEST.getStatusCode(), response.getStatus(),
-                    "Expected the joining fails as no compensate in link, PUT/400 is expected.");
-            String errorMsg = response.readEntity(String.class);
-            assertThat("Expected error message to contain the LRA id where enlist failed",
-                    errorMsg, containsString(lraId.toString()));
+        try {
+            String encodedLraId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            Link link = Link.fromUri(getNoopURL()).rel("complete").build();
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLraId)
+                    .request()
+                    .header(LRA_API_VERSION_HEADER_NAME, version)
+                    .header("Link", link.toString())
+                    .put(null)) {
+                Assertions.assertEquals(Status.BAD_REQUEST.getStatusCode(), response.getStatus(),
+                        "Expected the joining fails as no compensate in link, PUT/400 is expected.");
+                String errorMsg = response.readEntity(String.class);
+                assertThat("Expected error message to contain the LRA id where enlist failed",
+                        errorMsg, containsString(lraId.toString()));
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -916,32 +965,36 @@ public class CoordinatorApiIT extends TestBase {
         initCoordinatorApiIT(version);
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-        URI recoveryUri = lraClient.joinLRA(lraId, 0L, URI.create("http://localhost:8080"), new StringBuilder());
+        try {
+            URI recoveryUri = lraClient.joinLRA(lraId, 0L, URI.create("http://localhost:8080"), new StringBuilder());
 
-        String encodedLRAId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLRAId)
-                .path("remove")
-                .request()
-                .header(LRA_API_VERSION_HEADER_NAME, version)
-                .put(Entity.text(recoveryUri.toString()))) {
-            Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
-                    "Expected leaving the LRA to succeed, PUT/200 is expected.");
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Expected API header to be returned with the version provided in request");
-            Assertions.assertFalse(response.hasEntity(), "Expecting 'remove' API call returns no entity body");
-        }
+            String encodedLRAId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLRAId)
+                    .path("remove")
+                    .request()
+                    .header(LRA_API_VERSION_HEADER_NAME, version)
+                    .put(Entity.text(recoveryUri.toString()))) {
+                Assertions.assertEquals(Status.OK.getStatusCode(), response.getStatus(),
+                        "Expected leaving the LRA to succeed, PUT/200 is expected.");
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Expected API header to be returned with the version provided in request");
+                Assertions.assertFalse(response.hasEntity(), "Expecting 'remove' API call returns no entity body");
+            }
 
-        try (Response response = client.target(coordinatorUrl)
-                .path(encodedLRAId)
-                .path("remove")
-                .request()
-                .header(LRA_API_VERSION_HEADER_NAME, version)
-                .put(Entity.text(recoveryUri.toString()))) {
-            Assertions.assertEquals(Status.BAD_REQUEST.getStatusCode(), response.getStatus(),
-                    "Expected leaving the LRA to fail as it was removed just before, PUT/400 is expected.");
-            assertThat("Expected the failure message to contain the non existing participant id",
-                    response.readEntity(String.class), containsString(recoveryUri.toASCIIString()));
+            try (Response response = client.target(coordinatorUrl)
+                    .path(encodedLRAId)
+                    .path("remove")
+                    .request()
+                    .header(LRA_API_VERSION_HEADER_NAME, version)
+                    .put(Entity.text(recoveryUri.toString()))) {
+                Assertions.assertEquals(Status.BAD_REQUEST.getStatusCode(), response.getStatus(),
+                        "Expected leaving the LRA to fail as it was removed just before, PUT/400 is expected.");
+                assertThat("Expected the failure message to contain the non existing participant id",
+                        response.readEntity(String.class), containsString(recoveryUri.toASCIIString()));
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 
@@ -967,17 +1020,22 @@ public class CoordinatorApiIT extends TestBase {
 
         URI lraId = lraClient.startLRA(testName);
         lrasToAfterFinish.add(lraId);
-        String encodedLRAId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
-        String nonExistingParticipantUrl = "http://localhost:1234/Non-Existing-participant-LRA";
-        try (Response response = client.target(coordinatorUrl).path(encodedLRAId).path("remove").request()
-                .header(LRA_API_VERSION_HEADER_NAME, version).put(Entity.text(nonExistingParticipantUrl))) {
-            Assertions.assertEquals(
-                    Status.BAD_REQUEST.getStatusCode(), response.getStatus(),
-                    "Expected that the call fails on LRA participant " + nonExistingParticipantUrl + " not found , PUT/400.");
-            Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
-                    "Expected API header to be returned with the version provided in request");
-            assertThat("Expected the failure message to contain the wrong participant id",
-                    response.readEntity(String.class), containsString(nonExistingParticipantUrl));
+        try {
+            String encodedLRAId = URLEncoder.encode(lraId.toString(), StandardCharsets.UTF_8);
+            String nonExistingParticipantUrl = "http://localhost:1234/Non-Existing-participant-LRA";
+            try (Response response = client.target(coordinatorUrl).path(encodedLRAId).path("remove").request()
+                    .header(LRA_API_VERSION_HEADER_NAME, version).put(Entity.text(nonExistingParticipantUrl))) {
+                Assertions.assertEquals(
+                        Status.BAD_REQUEST.getStatusCode(), response.getStatus(),
+                        "Expected that the call fails on LRA participant " + nonExistingParticipantUrl
+                                + " not found , PUT/400.");
+                Assertions.assertEquals(version, response.getHeaderString(LRA_API_VERSION_HEADER_NAME),
+                        "Expected API header to be returned with the version provided in request");
+                assertThat("Expected the failure message to contain the wrong participant id",
+                        response.readEntity(String.class), containsString(nonExistingParticipantUrl));
+            }
+        } finally {
+            lraClient.cancelLRA(lraId);
         }
     }
 

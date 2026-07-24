@@ -23,15 +23,18 @@ import java.util.List;
 import java.util.stream.Collectors;
 import org.jboss.arquillian.container.test.api.RunAsClient;
 import org.jboss.arquillian.junit5.ArquillianExtension;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 @RunAsClient
 @ExtendWith(ArquillianExtension.class)
 public abstract class TestBase {
+    private static final Logger log = Logger.getLogger(TestBase.class);
 
     public static NarayanaLRAClient lraClient;
     public static String coordinatorUrl;
@@ -47,14 +50,19 @@ public abstract class TestBase {
     }
 
     @AfterEach
-    public void after() {
-        List<URI> lraURIList = lraClient.getAllLRAs().stream().map(LRAData::getLraId).collect(Collectors.toList());
-        if (lrasToAfterFinish != null) {
+    public void after(TestInfo testInfo) {
+        try {
+            List<URI> lraURIList = lraClient.getAllLRAs().stream().map(LRAData::getLraId).collect(Collectors.toList());
             for (URI lraToFinish : lrasToAfterFinish) {
                 if (lraURIList.contains(lraToFinish)) {
+                    log.warnf("LRA %s was still active after test %s — cancelling in @AfterEach safety net",
+                            lraToFinish, testInfo.getDisplayName());
                     lraClient.cancelLRA(lraToFinish);
                 }
             }
+        } finally {
+            lrasToAfterFinish.clear();
+            lraClient.clearCurrent(true);
         }
     }
 

@@ -558,9 +558,12 @@ public class ServerLRAFilter implements ContainerRequestFilter, ContainerRespons
                 } catch (WebApplicationException e) {
                     progress = updateProgress(progress, ProgressStep.CancelFailed, e.getMessage());
                 } catch (ProcessingException e) {
-                    Method method = resourceInfo.getResourceMethod();
+                    Method method = getResourceMethodSafely();
+                    String methodName = method != null
+                            ? method.getDeclaringClass().getName() + "#" + method.getName()
+                            : "<unavailable>";
                     LRALogger.i18nLogger.warn_lraFilterContainerRequest("ProcessingException: " + e.getMessage(),
-                            method.getDeclaringClass().getName() + "#" + method.getName(), current.toASCIIString());
+                            methodName, current.toASCIIString());
 
                     progress = updateProgress(progress, ProgressStep.CancelFailed, e.getMessage());
                     toClose = null;
@@ -615,14 +618,15 @@ public class ServerLRAFilter implements ContainerRequestFilter, ContainerRespons
                 getLRAClient().enlistCompensator(current, 0L, compensator, new StringBuilder(userData));
             }
 
-            if (responseContext.getStatus() == Response.Status.OK.getStatusCode()
-                    && resourceInfo.getResourceMethod() != null
-                    && NarayanaLRAClient.isAsyncCompletion(resourceInfo.getResourceMethod())) {
-                LRALogger.i18nLogger.warn_lraParticipantqForAsync(
-                        resourceInfo.getResourceMethod().getDeclaringClass().getName(),
-                        resourceInfo.getResourceMethod().getName(),
-                        Response.Status.ACCEPTED.getStatusCode(),
-                        Response.Status.OK.getStatusCode());
+            if (responseContext.getStatus() == Response.Status.OK.getStatusCode()) {
+                Method responseMethod = getResourceMethodSafely();
+                if (responseMethod != null && NarayanaLRAClient.isAsyncCompletion(responseMethod)) {
+                    LRALogger.i18nLogger.warn_lraParticipantqForAsync(
+                            responseMethod.getDeclaringClass().getName(),
+                            responseMethod.getName(),
+                            Response.Status.ACCEPTED.getStatusCode(),
+                            Response.Status.OK.getStatusCode());
+                }
             }
 
             /*
@@ -838,6 +842,15 @@ public class ServerLRAFilter implements ContainerRequestFilter, ContainerRespons
             }
         } catch (ContextNotActiveException e) {
             LRALogger.i18nLogger.warn_missingContexts("LRAParticipantData is not usable in this (probably async) context.");
+        }
+    }
+
+    private Method getResourceMethodSafely() {
+        try {
+            return resourceInfo != null ? resourceInfo.getResourceMethod() : null;
+        } catch (ContextNotActiveException e) {
+            LRALogger.i18nLogger.warn_missingContexts("ResourceInfo is not usable in this (probably async) context.");
+            return null;
         }
     }
 

@@ -61,7 +61,6 @@
     <!-- Checkstyle is enabled by default -->
     <checkstyle.skip>false</checkstyle.skip>
     <format.skip>false</format.skip>
-    <skip.release>false</skip.release>
     <ipv6.server.jvm.args>-Djboss.bind.address=[::1] -Djboss.bind.address.management=[::1]
       -Djboss.bind.address.unsecure=[::1] -Djava.net.preferIPv4Stack=false -Djava.net.preferIPv6Addresses=true</ipv6.server.jvm.args>
     <jvm.args.byteman>-Dorg.jboss.byteman.verbose
@@ -106,6 +105,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
     <server.jvm.args>${jvm.args.other} ${jvm.args.memory} ${jvm.args.modular}</server.jvm.args>
+    <skip.release>false</skip.release>
     <skipITs>true</skipITs>
     <!-- Sortpom is enabled by default, but it could be disabled in sub-modules setting sortpom.skip = true -->
     <sortpom.skip>false</sortpom.skip>

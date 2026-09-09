@@ -108,5 +108,9 @@
       <artifactId>resteasy-undertow</artifactId>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.jboss.weld.se</groupId>
+      <artifactId>weld-se-core</artifactId>
+    </dependency>
   </dependencies>
 </project>

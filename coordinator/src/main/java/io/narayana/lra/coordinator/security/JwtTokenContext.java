@@ -7,6 +7,8 @@ package io.narayana.lra.coordinator.security;
 
 import io.narayana.lra.LRAConstants;
 import io.narayana.lra.logging.LRALogger;
+import jakarta.enterprise.context.ContextNotActiveException;
+import jakarta.enterprise.inject.Instance;
 import jakarta.enterprise.inject.spi.CDI;
 import jakarta.ws.rs.client.Client;
 import jakarta.ws.rs.client.ClientBuilder;
@@ -81,17 +83,30 @@ public final class JwtTokenContext {
 
     private static String getTokenFromCDI() {
         try {
-            JsonWebToken jwt = CDI.current().select(JsonWebToken.class).get();
-            String rawToken = jwt.getRawToken();
-            if (rawToken != null) {
-                if (LRALogger.logger.isTraceEnabled()) {
+            Instance<JsonWebToken> jwt = CDI.current().select(JsonWebToken.class);
+            // isResolvable() guards against UnsatisfiedResolutionException (no JsonWebToken bean, e.g.
+            // MicroProfile JWT not enabled) and AmbiguousResolutionException (more than one), either of
+            // which would otherwise escape .get() and abort the outbound call.
+            if (jwt.isResolvable()) {
+                String rawToken = jwt.get().getRawToken();
+                if (rawToken != null && LRALogger.logger.isTraceEnabled()) {
                     LRALogger.logger.trace("JWT token resolved from CDI for outbound call");
                 }
+                return rawToken;
             }
-            return rawToken;
+            return null;
+        } catch (ContextNotActiveException e) {
+            // Off the request thread (recovery, async callbacks): container up but no request scope
+            // backs JsonWebToken. Expected here, so trace only and return null; newClient() then
+            // falls back to the service token.
+            if (LRALogger.logger.isTraceEnabled()) {
+                LRALogger.logger.tracef("No active CDI request scope for JWT resolution: %s", e.getMessage());
+            }
+            return null;
         } catch (IllegalStateException e) {
+            // No CDI container available at all (e.g. a non-CDI runtime).
             if (LRALogger.logger.isDebugEnabled()) {
-                LRALogger.logger.debugf("CDI JsonWebToken not available: %s", e.getMessage());
+                LRALogger.logger.debugf("No CDI container available for JWT resolution: %s", e.getMessage());
             }
             return null;
         }
